@@ -173,16 +173,6 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
-        if (not self.disable_sliding_window
-                and self.hf_text_config.model_type == "gemma2"
-                and self.hf_text_config.sliding_window is not None):
-            print_warning_once(
-                "Gemma 2 uses sliding window attention for every odd layer, "
-                "which is currently not supported by vLLM. Disabling sliding "
-                "window and capping the max length to the sliding window size "
-                f"({self.hf_text_config.sliding_window}).")
-            self.disable_sliding_window = True
-
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -607,7 +597,7 @@ class CacheConfig:
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
         self.is_attention_free = is_attention_free
-        self.sliding_window = sliding_window
+        self.sliding_window = None # NOTE(chen): a hack for Gemma2, need to fix
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self._verify_args()

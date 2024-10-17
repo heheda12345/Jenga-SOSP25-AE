@@ -140,19 +140,17 @@ class Gemma2Attention(nn.Module):
             is_neox_style=True,
         )
 
-        # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
-        # odd layer, vLLM currently ignores it and uses global attention for
-        # all layers.
-        use_sliding_window = (layer_idx % 2 == 1
+        use_sliding_window = (layer_idx % 2 == 0
                               and config.sliding_window is not None)
-        del use_sliding_window  # Unused.
+        sliding_window_size = config.sliding_window if use_sliding_window else -1
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap)
+                              logits_soft_cap=attn_logits_soft_cap,
+                              sliding_window_size=sliding_window_size)
 
     def forward(
         self,
