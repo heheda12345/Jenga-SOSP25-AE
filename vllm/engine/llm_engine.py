@@ -493,7 +493,7 @@ class LLMEngine:
             )
             custom_block_manager.compile(available_cpu_memory,
                                          available_gpu_memory)
-            self.model_executor.initialize_cache(
+            self.model_executor.initialize_cache_from_kv_cache_config(
                 custom_block_manager.kv_cache_config)
         else:
             num_gpu_blocks, num_cpu_blocks = (

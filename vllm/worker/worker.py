@@ -233,7 +233,7 @@ class Worker(LocalOrDistributedWorkerBase):
         available_gpu_memory = total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory
         available_cpu_memory = self.cache_config.swap_space_bytes
 
-        return available_gpu_memory, available_cpu_memory
+        return int(available_gpu_memory), int(available_cpu_memory)
 
     def initialize_cache_from_kv_cache_config(
         self,

@@ -2,7 +2,7 @@
 from abc import abstractmethod
 import math
 from typing import Protocol, Dict, Any, Type, TYPE_CHECKING
-from torch import nn
+import torch
 from typing_extensions import TypeVar
 from vllm.config import KVCacheConfig, ModelConfig, ParallelConfig
 from vllm.core.block.block_table import BlockTable
@@ -24,19 +24,24 @@ def require_kv_config_init(func):
 
 class AppAwareManager:
 
-    def __init__(self):
-        self.kv_cache_config = KVCacheConfig(block_size_bytes=-1,
-                                             num_logic_layers=-1)
-        self.block_size = -1
+    def __init__(self, dtype: torch.dtype):
         self.initialized = False
+        assert isinstance(dtype, torch.dtype)
+        self.dtype = dtype
 
     def init_kv_cache_config(self, kv_cache_config: KVCacheConfig):
         assert not self.initialized, "KV cache config is already initialized"
-        self.kv_cache_config = kv_cache_config
+        # self.kv_cache_config = kv_cache_config
+        # TODO: can we remove this function?
         self.initialized = True
 
     @abstractmethod
-    def get_page_size(self, block_size: int):
+    def get_page_size(self) -> int:
+        pass
+
+    @abstractmethod
+    def get_app_property(self) -> str:
+        # app with the same property can share the same block table
         pass
 
     @abstractmethod
@@ -68,7 +73,8 @@ AppAwareAttnMetadataBuilder = AppAwareManager
 
 
 def get_token_size_default(model_config: ModelConfig,
-                           parallel_config: ParallelConfig, cache_dtype: str):
+                           parallel_config: ParallelConfig,
+                           dtype: torch.dtype) -> int:
     head_size = model_config.get_head_size()
     num_heads = model_config.get_num_kv_heads(parallel_config)
     num_attention_layers = 1
@@ -76,31 +82,32 @@ def get_token_size_default(model_config: ModelConfig,
     key_cache_block = num_heads * head_size
     value_cache_block = key_cache_block
     total = num_attention_layers * (key_cache_block + value_cache_block)
-    if cache_dtype == "auto":
-        dtype = model_config.dtype
-    else:
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
     dtype_size = get_dtype_size(dtype)
     return dtype_size * total
+
+
+def get_dtype(cache_dtype: str, model_config: ModelConfig) -> torch.dtype:
+    if cache_dtype == "auto":
+        return model_config.dtype
+    return STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
 
 
 class SelfAttentionManager(AppAwareManager):
 
     def __init__(self, model_config: ModelConfig,
-                 parallel_config: ParallelConfig, cache_dtype: str):
-        super().__init__()
+                 parallel_config: ParallelConfig, cache_dtype: str,
+                 block_size: int):
+        super().__init__(get_dtype(cache_dtype, model_config))
         self.memory_per_token = get_token_size_default(model_config,
                                                        parallel_config,
-                                                       cache_dtype)
-        self.block_size = -1
+                                                       self.dtype)
+        self.block_size = block_size
 
-    def init_kv_cache_config(self, kv_cache_config: KVCacheConfig):
-        super().init_kv_cache_config(kv_cache_config)
-        assert kv_cache_config.block_size_bytes % self.memory_per_token == 0
-        self.block_size = kv_cache_config.block_size_bytes // self.memory_per_token
+    def get_page_size(self):
+        return self.block_size * self.memory_per_token
 
-    def get_page_size(self, block_size: int):
-        return block_size * self.memory_per_token
+    def get_app_property(self) -> str:
+        return "self_attention"
 
     @require_kv_config_init
     def get_num_required_blocks(self,
@@ -162,20 +169,19 @@ class SelfAttentionManager(AppAwareManager):
 class EncoderDecoderManager(AppAwareManager):
 
     def __init__(self, model_config: ModelConfig,
-                 parallel_config: ParallelConfig, cache_dtype: str):
-        super().__init__()
+                 parallel_config: ParallelConfig, cache_dtype: str,
+                 block_size: int):
+        super().__init__(get_dtype(cache_dtype, model_config))
         self.memory_per_token = get_token_size_default(model_config,
                                                        parallel_config,
-                                                       cache_dtype)
-        self.block_size = -1
+                                                       self.dtype)
+        self.block_size = block_size
 
-    def init_kv_cache_config(self, kv_cache_config: KVCacheConfig):
-        super().init_kv_cache_config(kv_cache_config)
-        assert kv_cache_config.block_size_bytes % self.memory_per_token == 0
-        self.block_size = kv_cache_config.block_size_bytes // self.memory_per_token
+    def get_page_size(self):
+        return self.block_size * self.memory_per_token
 
-    def get_page_size(self, block_size: int):
-        return block_size * self.memory_per_token
+    def get_app_property(self) -> str:
+        return "encoder_decoder"
 
     @require_kv_config_init
     def get_num_required_blocks(self,
@@ -220,21 +226,14 @@ class SlidingWindowManager(AppAwareManager):
 
     def __init__(self, model_config: ModelConfig,
                  parallel_config: ParallelConfig, cache_dtype: str,
-                 sliding_window_size: int):
-        super().__init__()
+                 block_size: int, sliding_window_size: int):
+        super().__init__(get_dtype(cache_dtype, model_config))
         self.memory_per_token = get_token_size_default(model_config,
                                                        parallel_config,
-                                                       cache_dtype)
+                                                       self.dtype)
         assert sliding_window_size > 0
         self.sliding_window_size = sliding_window_size
-        self.block_size = -1
-        self.max_block_sliding_window = -1
-
-    def init_kv_cache_config(self, kv_cache_config: KVCacheConfig):
-        super().init_kv_cache_config(kv_cache_config)
-        assert kv_cache_config.block_size_bytes % self.memory_per_token == 0
-        self.block_size = kv_cache_config.block_size_bytes // self.memory_per_token
-
+        self.block_size = block_size
         # +1 here because // rounds down
         num_blocks = (self.sliding_window_size - 1) // self.block_size + 1
         # +1 here because the last block may not be full,
@@ -243,8 +242,11 @@ class SlidingWindowManager(AppAwareManager):
         # we may need 2 blocks when the second block only holds 1 token.
         self.max_block_sliding_window = num_blocks + 1
 
-    def get_page_size(self, block_size: int):
-        return block_size * self.memory_per_token
+    def get_page_size(self):
+        return self.block_size * self.memory_per_token
+
+    def get_app_property(self) -> str:
+        return f"sliding_window_{self.sliding_window_size}"
 
     @require_kv_config_init
     def get_num_required_blocks(self,

@@ -1,3 +1,4 @@
+from abc import abstractmethod
 import enum
 import json
 from dataclasses import dataclass, field, fields
@@ -6,6 +7,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
 
 import torch
 from transformers import PretrainedConfig
+import msgspec
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -645,13 +647,45 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-@dataclass
-class KVCacheConfig:
+class ComponentType(msgspec.Struct, omit_defaults=True, array_like=True):
+    start_bias: int
+    end_bias: int
+    page_size: int  # number of elements in a page
+
+    @abstractmethod
+    def format_tensor(
+        self, buffer: torch.Tensor
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        pass
+
+
+class KVPageType(ComponentType):
+
+    def format_tensor(
+        self, buffer: torch.Tensor
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        raise NotImplementedError(
+            "format_tensor is not implemented for KVPage")
+
+
+class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     # This config is built after the initialization of workers
     # so keep it out of CacheConfig
+    buffer_size: int
+    buffer_dtype: torch.dtype
+    component_config: Dict[str, ComponentType]  # layer_id -> ComponentType
+    attn_meta_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
 
-    block_size_bytes: int
-    num_logic_layers: int
+
+class SchedulerKVCacheConfig:
+    memory_config: dict[str, int]  # type_id -> memory_size
+    type_of_group: dict[str, str]  # group_id -> type_id
+    attn_meta_sharing: dict[str, list[str]]  # group_id -> List[layer_id]
+
+
+@dataclass
+class ManagerKVCacheConfig:
+    block_size: int
 
 
 @dataclass

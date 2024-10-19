@@ -54,7 +54,8 @@ def custom_block_manager_for_opt(model_config: ModelConfig,
     for i in range(model_config.get_num_layers(parallel_config)):
         custom_managers[i] = SelfAttentionManager(model_config,
                                                   parallel_config,
-                                                  cache_config.cache_dtype)
+                                                  cache_config.cache_dtype,
+                                                  cache_config.block_size)
     return custom_managers
 
 

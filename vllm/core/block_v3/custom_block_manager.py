@@ -1,7 +1,7 @@
 import math
 from typing import List, Optional, Dict, NewType
 
-from vllm.config import CacheConfig, KVCacheConfig, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig
 from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import (
     Block,
@@ -37,6 +37,39 @@ def require_kv_config_not_init(func):
     return require_kv_config_not_init_wrapper
 
 
+# for simplicity, we assume all components use the same dtype, so that the
+# indexing can be easier. can be extended to different dtypes if needed.
+def assert_and_get_same_dtype(managers: List[AppAwareManager]):
+    dtype = None
+    for manager in managers:
+        if dtype is None:
+            dtype = manager.dtype
+        else:
+            assert dtype == manager.dtype, "Different dtype detected"
+    return dtype
+
+
+GroupResult = Dict[int, Dict[
+    str, List[int]]]  # page_size -> {app_property -> [layer_id]}
+
+
+def get_num_pages(num_elements: int, page_size: int) -> int:
+    return (num_elements + page_size - 1) // page_size
+
+
+class UniqueID:
+
+    def __init__(self):
+        self.names = set()
+
+    def get_group_id(self, group_name: str) -> str:
+        i = 0
+        while f"{group_name}_{i}" in self.names:
+            i += 1
+        self.names.add(f"{group_name}_{i}")
+        return f"{group_name}_{i}"
+
+
 class CustomBlockManager:
 
     def __init__(self, parallel_config: ParallelConfig,
@@ -47,14 +80,14 @@ class CustomBlockManager:
         # modifying _app_aware_managers is not allowed after is_finalized=True
         self._app_aware_managers: Dict[int, AppAwareManager] = {}
         # reading _kv_cache_config is not allowed before is_finalized=True
-        self._kv_cache_config = KVCacheConfig(block_size_bytes=-1,
-                                              num_logic_layers=-1)
+        self._kv_cache_config: Optional[KVCacheConfig] = None
 
     @require_kv_config_not_init
     def compile(self, available_cpu_memory: int, available_gpu_memory: int):
-        self._kv_cache_config = self._get_kv_cache_config()
-        for manager in self._app_aware_managers.values():
-            manager.init_kv_cache_config(self._kv_cache_config)
+        self._kv_cache_config = self._compile_get_kv_cache_config(
+            available_gpu_memory)
+        # for layer_id, manager in self._app_aware_managers.values():
+        #     manager.init_kv_cache_config(self._kv_cache_config[layer_id])
         self._initialized = True
 
     @property
@@ -63,17 +96,59 @@ class CustomBlockManager:
         assert self._initialized
         return self._kv_cache_config
 
-    def _get_kv_cache_config(self):
-        page_sizes = [
-            manager.get_page_size(self.cache_config.block_size)
-            for manager in self._app_aware_managers.values()
-        ]
-        # We assume all components use the same page size now.
-        assert all(page_size == page_sizes[0] for page_size in page_sizes)
-        block_size_bytes = page_sizes[0]
+    @require_kv_config_not_init
+    def _compile_get_kv_cache_config(
+            self, available_gpu_memory: int) -> KVCacheConfig:
+        dtype = assert_and_get_same_dtype(self._app_aware_managers.values())
+        available_num_elements = available_gpu_memory // get_dtype_size(dtype)
+        group_result: GroupResult = {}
+        for layer_id, manager in self._app_aware_managers.items():
+            page_size = manager.get_page_size()
+            if page_size not in group_result:
+                group_result[page_size] = {}
+            app_property = manager.get_app_property()
+            if app_property not in group_result[page_size]:
+                group_result[page_size][app_property] = []
+            group_result[page_size][app_property].append(layer_id)
 
-        return KVCacheConfig(block_size_bytes=block_size_bytes,
-                             num_logic_layers=1)
+        # only one page size
+        if len(group_result) == 1:
+            page_size = list(group_result.keys())[0]
+            groups = group_result[page_size]  # {app_property -> [layer_id]}
+            group_sizes = [len(layers) for layers in groups.values()]
+            group_size_gcd = math.gcd(*group_sizes)
+            num_pages = get_num_pages(available_num_elements, page_size)
+
+            unique_id = UniqueID()
+
+            kv_cache_config = KVCacheConfig(buffer_size=num_pages * page_size,
+                                            buffer_dtype=dtype,
+                                            component_config={},
+                                            attn_meta_sharing={})
+
+            for app_property, layers in groups.items():
+                for i in range(0, len(layers), group_size_gcd):
+                    group_id = unique_id.get_group_id(app_property)
+                    kv_cache_config.attn_meta_sharing[group_id] = []
+                    for idx_in_group, layer_id in enumerate(
+                            layers[i:i + group_size_gcd]):
+                        kv_cache_config.attn_meta_sharing[group_id].append(
+                            layer_id)
+                        kv_cache_config.component_config[
+                            layer_id] = KVPageType(
+                                start_bias=idx_in_group * page_size,
+                                end_bias=(idx_in_group + 1) * page_size,
+                                page_size=page_size,
+                            )
+            print("kv_cache_config", kv_cache_config)
+            return kv_cache_config
+
+        raise NotImplementedError("too complex")
+        # # all page size have only one app_property, and the app_property is the same:
+        # # e.g., spec decode
+        # group_result_first = list(group_result.values())[0]
+        # if all(len(app_property) == 1 for app_property in group_result.values()) and \
+        #     all(app_property.keys() == group_result_first.keys() for app_property in group_result.values()):
 
     @require_kv_config_not_init
     def add_app_aware_managers(self, managers: Dict[int, AppAwareManager]):

@@ -58,11 +58,13 @@ def custom_block_manager_for_gemma2(model_config: ModelConfig,
             custom_managers[i] = SlidingWindowManager(model_config,
                                                       parallel_config,
                                                       cache_config.cache_dtype,
+                                                      cache_config.block_size,
                                                       sliding_window)
         else:
             custom_managers[i] = SelfAttentionManager(model_config,
                                                       parallel_config,
-                                                      cache_config.cache_dtype)
+                                                      cache_config.cache_dtype,
+                                                      cache_config.block_size)
     return custom_managers
 
 

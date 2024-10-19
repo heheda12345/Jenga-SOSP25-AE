@@ -203,11 +203,13 @@ def custom_block_manager_for_mllama(
     for i in range(model_config.hf_config.text_config.num_hidden_layers):
         if i in cross_attention_layers:
             custom_managers[i] = EncoderDecoderManager(
-                model_config, parallel_config, cache_config.cache_dtype)
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
         else:
             custom_managers[i] = SelfAttentionManager(model_config,
                                                       parallel_config,
-                                                      cache_config.cache_dtype)
+                                                      cache_config.cache_dtype,
+                                                      cache_config.block_size)
     return custom_managers
 
 
