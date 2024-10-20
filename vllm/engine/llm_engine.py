@@ -333,6 +333,14 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        if self.scheduler_config.use_per_layer_block_manager:
+            custom_block_manager: Optional[
+                CustomBlockManager] = self.get_custom_block_manager()
+            self.kv_cache_config: Optional[
+                KVCacheConfig] = custom_block_manager.compile(0, 0)
+        else:
+            custom_block_manager = None
+            self.kv_cache_config = None
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -344,9 +352,8 @@ class LLMEngine:
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
             observability_config=self.observability_config,
+            kv_cache_config=self.kv_cache_config,
         )
-
-        custom_block_manager = self.get_custom_block_manager()
 
         if not self.model_config.embedding_mode:
             self._initialize_kv_caches(custom_block_manager)
@@ -489,15 +496,15 @@ class LLMEngine:
         and the swap CPU cache.
         """
         if custom_block_manager is not None:
-            available_gpu_memory, available_cpu_memory = self.model_executor.get_available_memory(
-            )
+            available_gpu_memory, available_cpu_memory = \
+                self.model_executor.get_available_memory()
             logger.info("Available GPU memory: %d GB, CPU memory: %d GB",
                         available_gpu_memory / 2**30,
                         available_cpu_memory / 2**30)
-            custom_block_manager.compile(available_cpu_memory,
-                                         available_gpu_memory)
+            kv_cache_config = custom_block_manager.compile(
+                available_cpu_memory, available_gpu_memory)
             self.model_executor.initialize_cache_from_kv_cache_config(
-                custom_block_manager.kv_cache_config)
+                kv_cache_config)
         else:
             num_gpu_blocks, num_cpu_blocks = (
                 self.model_executor.determine_num_available_blocks())
@@ -1960,19 +1967,17 @@ class LLMEngine:
 
         return sampling_params
 
-    def get_custom_block_manager(self) -> Optional[CustomBlockManager]:
-        if self.scheduler_config.use_per_layer_block_manager:
-            block_manager = CustomBlockManager(self.parallel_config,
-                                               self.cache_config)
-            if self.speculative_config is None:
-                block_manager.add_block_managers_of_model(
-                    self.model_config, self.parallel_config)
-            else:
-                block_manager.add_block_managers_of_model(
-                    self.speculative_config.draft_model_config,
-                    self.speculative_config.draft_parallel_config, 'd.')
-                block_manager.add_block_managers_of_model(
-                    self.model_config, self.parallel_config, 'm.')
-            return block_manager
+    def get_custom_block_manager(self) -> CustomBlockManager:
+        block_manager = CustomBlockManager(self.parallel_config,
+                                           self.cache_config)
+        if self.speculative_config is None:
+            block_manager.add_block_managers_of_model(self.model_config,
+                                                      self.parallel_config)
         else:
-            return None
+            block_manager.add_block_managers_of_model(
+                self.speculative_config.draft_model_config,
+                self.speculative_config.draft_parallel_config, 'd.')
+            block_manager.add_block_managers_of_model(self.model_config,
+                                                      self.parallel_config,
+                                                      'm.')
+        return block_manager

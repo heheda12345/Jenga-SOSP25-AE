@@ -33,6 +33,7 @@ class ExecutorBase(ABC):
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         observability_config: Optional[ObservabilityConfig],
+        kv_cache_config: Optional[KVCacheConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -44,6 +45,7 @@ class ExecutorBase(ABC):
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config
+        self.kv_cache_config = kv_cache_config
         self._init_executor()
 
     @abstractmethod

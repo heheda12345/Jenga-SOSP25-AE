@@ -1,6 +1,6 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -630,6 +630,9 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
+        if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() == 0:
+            kv_cache = (kv_cache, kv_cache)
+
         output = torch.ops.vllm.unified_flash_attention(
             query,
             key,
@@ -637,7 +640,8 @@ class FlashAttentionImpl(AttentionImpl):
             self.num_heads,
             self.head_size,
             self.num_kv_heads,
-            kv_cache,
+            kv_cache[0],
+            kv_cache[1],
             self.kv_cache_dtype,
             k_scale,
             v_scale,
@@ -652,7 +656,7 @@ class FlashAttentionImpl(AttentionImpl):
 
 
 @torch.library.custom_op("vllm::unified_flash_attention",
-                         mutates_args=["kv_cache"])
+                         mutates_args=["key_cache", "value_cache"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -660,7 +664,8 @@ def unified_flash_attention(
     num_heads: int,
     head_size: int,
     num_kv_heads: int,
-    kv_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
     kv_cache_dtype: str,
     k_scale: float,
     v_scale: float,
@@ -668,7 +673,7 @@ def unified_flash_attention(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-    layer_id: Optional[int] = None,
+    layer_id: Optional[str] = None,
 ) -> torch.Tensor:
 
     current_metadata_ctx = get_forward_context()
@@ -686,18 +691,15 @@ def unified_flash_attention(
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
 
-    if kv_cache.numel() > 0:
-        key_cache = kv_cache[0]
-        value_cache = kv_cache[1]
-
+    if key_cache.numel() > 0:
         # Reshape the input keys and values and store them in the cache.
         # If kv_cache is not provided, the new key and value tensors are
         # not cached. This happens during the initial memory profiling run.
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
-            kv_cache[0],
-            kv_cache[1],
+            key_cache,
+            value_cache,
             attn_metadata.slot_mapping.flatten(),
             kv_cache_dtype,
             k_scale,
@@ -726,7 +728,7 @@ def unified_flash_attention(
 
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
-        if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
+        if (key_cache.numel() == 0 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0):
             # normal attention
             # When block_tables are not filled, it means q and k are the

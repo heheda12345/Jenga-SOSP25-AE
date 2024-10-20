@@ -78,17 +78,21 @@ class CustomBlockManager:
         self.cache_config = cache_config
         self._initialized = False
         # modifying _app_aware_managers is not allowed after is_finalized=True
-        self._app_aware_managers: Dict[int, AppAwareManager] = {}
+        self._app_aware_managers: Dict[str, AppAwareManager] = {}
         # reading _kv_cache_config is not allowed before is_finalized=True
         self._kv_cache_config: Optional[KVCacheConfig] = None
 
     @require_kv_config_not_init
-    def compile(self, available_cpu_memory: int, available_gpu_memory: int):
+    def compile(self, available_cpu_memory: int,
+                available_gpu_memory: int) -> KVCacheConfig:
         self._kv_cache_config = self._compile_get_kv_cache_config(
             available_gpu_memory)
-        # for layer_id, manager in self._app_aware_managers.values():
-        #     manager.init_kv_cache_config(self._kv_cache_config[layer_id])
-        self._initialized = True
+        # This function is called twice. One with available_gpu_memory=0 to get
+        # the config for profile run, and the other with available_gpu_memory>0
+        # to get the final KVCacheConfig.
+        if available_gpu_memory > 0:
+            self._initialized = True
+        return self._kv_cache_config
 
     @property
     @require_kv_config_init

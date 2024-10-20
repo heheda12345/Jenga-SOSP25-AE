@@ -52,10 +52,9 @@ def custom_block_manager_for_opt(model_config: ModelConfig,
                                  parallel_config: ParallelConfig):
     custom_managers = {}
     for i in range(model_config.get_num_layers(parallel_config)):
-        custom_managers[i] = SelfAttentionManager(model_config,
-                                                  parallel_config,
-                                                  cache_config.cache_dtype,
-                                                  cache_config.block_size)
+        custom_managers[str(i)] = SelfAttentionManager(
+            model_config, parallel_config, cache_config.cache_dtype,
+            cache_config.block_size)
     return custom_managers
 
 
@@ -116,7 +115,7 @@ class OPTAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        layer_id: Optional[int] = None,
+        layer_id: str,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
@@ -176,7 +175,7 @@ class OPTDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        layer_id: Optional[int] = None,
+        layer_id: str,
     ) -> torch.Tensor:
         # Self Attention
         residual = hidden_states
@@ -288,10 +287,9 @@ class OPTDecoder(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states = layer(hidden_states,
-                                  kv_caches[i - self.start_layer],
-                                  attn_metadata[i - self.start_layer],
-                                  i - self.start_layer)
+            layer_id = str(i)
+            hidden_states = layer(hidden_states, kv_caches[layer_id],
+                                  attn_metadata[layer_id], layer_id)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

@@ -20,9 +20,9 @@ from vllm.attention import AttentionMetadataBuilder
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.core.block_v3.registry import BlockManagerRegistry, BLOCK_MANAGER_REGISTRY
 from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder
@@ -461,9 +461,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             }
         else:
             self.attn_metadata_builders = {
-                0: self.attn_backend.make_metadata_builder(weakref.proxy(self))
+                "0":
+                self.attn_backend.make_metadata_builder(weakref.proxy(self))
             }
-        self.app_attn_metadata_builders = app_attn_metadata_builders
 
         # Engine/Model configurations.
         self.chunked_prefill_enabled = (
@@ -884,19 +884,28 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata.
         if self.scheduler_config.use_per_layer_block_manager:
             # Run per-layer build here
-            attn_metadata = {
+            attn_metadata_groups = {
                 group_id:
                 attn_metadata_builder.build(seq_lens, query_lens,
                                             cuda_graph_pad_size, batch_size)
                 for group_id, attn_metadata_builder in
                 self.attn_metadata_builders.items()
             }
+            kv_cache_config = self.runner.kv_cache_config
+            assert kv_cache_config is not None
+            attn_metadata = {
+                layer_id: attn_metadata_groups[group_id]
+                for group_id, layer_ids in
+                kv_cache_config.block_table_sharing.items()
+                for layer_id in layer_ids
+            }
+
         else:
-            unified_attn_metadata = self.attn_metadata_builders[0].build(
+            unified_attn_metadata = self.attn_metadata_builders["0"].build(
                 seq_lens, query_lens, cuda_graph_pad_size, batch_size)
             if self.runner.use_per_layer_attn_metadata:
                 attn_metadata = {
-                    i: unified_attn_metadata
+                    str(i): unified_attn_metadata
                     for i in range(
                         self.runner.model_config.get_num_layers(
                             self.runner.parallel_config))
@@ -993,9 +1002,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
         observability_config: Optional[ObservabilityConfig] = None,
+        kv_cache_config: Optional[KVCacheConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        block_manager_registry: BlockManagerRegistry = BLOCK_MANAGER_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -1008,6 +1017,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
+        self.kv_cache_config = kv_cache_config
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -1084,15 +1094,22 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
-        self.use_per_layer_attn_metadata = block_manager_registry.support_model(
+        self.use_per_layer_attn_metadata = BLOCK_MANAGER_REGISTRY.support_model(
             self.model_config)
+        self.app_attn_metadata_builders = {}
         if self.scheduler_config.use_per_layer_block_manager:
-            self.app_attn_metadata_builders = block_manager_registry \
+            assert kv_cache_config is not None
+            app_attn_metadata_builders = BLOCK_MANAGER_REGISTRY \
                 .get_managers_of_model(self.model_config, self.cache_config, self.parallel_config)
-            # assert self.model_config.enforce_eager, (
-            #     "per-layer block manager is not compatible with cuda graph.")
-        else:
-            self.app_attn_metadata_builders = {}
+            assert len(self.app_attn_metadata_builders) == 0
+            self.app_attn_metadata_builders = {
+                group_id: app_attn_metadata_builders[layer_ids[0]]
+                for group_id, layer_ids in
+                kv_cache_config.block_table_sharing.items()
+            }
+
+    def set_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
+        self.kv_cache_config = kv_cache_config
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1325,10 +1342,30 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(num_layers)
-        ]
+        if self.use_per_layer_attn_metadata:
+            if self.scheduler_config.use_per_layer_block_manager:
+                kv_cache_config = self.kv_cache_config
+                assert kv_cache_config is not None
+                kv_caches = {
+                    layer_id: torch.tensor([],
+                                           dtype=kv_cache_config.buffer_dtype,
+                                           device=self.device)
+                    for layer_ids in
+                    kv_cache_config.block_table_sharing.values()
+                    for layer_id in layer_ids
+                }
+            else:
+                kv_caches = {
+                    str(layer_id): torch.tensor([],
+                                                dtype=torch.float32,
+                                                device=self.device)
+                    for layer_id in range(num_layers)
+                }
+        else:
+            kv_caches = [
+                torch.tensor([], dtype=torch.float32, device=self.device)
+                for _ in range(num_layers)
+            ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
@@ -1510,7 +1547,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                 is_encoder_decoder_model=self.model_config.
                                 is_encoder_decoder_model)
                             attn_metadata = {
-                                layer_id: unified_attn_metadata
+                                str(layer_id): unified_attn_metadata
                                 for layer_id in range(
                                     self.model_config.get_num_layers(
                                         self.parallel_config))
@@ -1746,12 +1783,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
-
-        if self.scheduler_config.use_per_layer_block_manager:
-            kv_caches = [
-                kv_caches[0] for _layer_id in range(
-                    self.model_config.get_num_layers(self.parallel_config))
-            ]
 
         with set_forward_context(model_input.attn_metadata):
             hidden_or_intermediate_states = model_executable(

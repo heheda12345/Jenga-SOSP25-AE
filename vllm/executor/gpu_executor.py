@@ -65,6 +65,7 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
             observability_config=self.observability_config,
+            kv_cache_config=self.kv_cache_config,
         )
 
     def _get_worker_module_and_class(

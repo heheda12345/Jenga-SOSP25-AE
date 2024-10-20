@@ -58,6 +58,7 @@ class Worker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
         observability_config: Optional[ObservabilityConfig] = None,
+        kv_cache_config: Optional[KVCacheConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -71,6 +72,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.kv_cache_config = kv_cache_config
         self.is_driver_worker = is_driver_worker
         if parallel_config and is_driver_worker:
             assert rank % parallel_config.tensor_parallel_size == 0, \
@@ -109,6 +111,7 @@ class Worker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
             observability_config=observability_config,
+            kv_cache_config=kv_cache_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -263,6 +266,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_config.__delattr__("num_gpu_blocks")
         self.cache_config.__delattr__("num_cpu_blocks")
 
+        self.kv_cache_config = kv_cache_config
+        self.model_runner.set_kv_cache_config(kv_cache_config)
         self._init_cache_engine(kv_cache_config)
         self._warm_up_model()
 
@@ -347,12 +352,10 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             assert self.cache_config.num_gpu_blocks is not None
             self.cache_engine = [
-                CacheEngine(
-                    self.cache_config,
-                    self.model_config,
-                    self.parallel_config,
-                    self.device_config,
-                ) for _ in range(self.parallel_config.pipeline_parallel_size)
+                CacheEngine(self.cache_config, self.model_config,
+                            self.parallel_config, self.device_config,
+                            self.model_runner.use_per_layer_attn_metadata)
+                for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache

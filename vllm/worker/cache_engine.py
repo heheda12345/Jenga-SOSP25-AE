@@ -22,13 +22,9 @@ class CacheEngine:
     as swapping and copying.
     """
 
-    def __init__(
-        self,
-        cache_config: CacheConfig,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        device_config: DeviceConfig,
-    ) -> None:
+    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
+                 parallel_config: ParallelConfig, device_config: DeviceConfig,
+                 use_per_layer_attn_metadata: bool) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -53,6 +49,8 @@ class CacheEngine:
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        self.use_per_layer_attn_metadata = use_per_layer_attn_metadata
+
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
@@ -69,11 +67,8 @@ class CacheEngine:
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-    def _allocate_kv_cache(
-        self,
-        num_blocks: int,
-        device: str,
-    ) -> List[torch.Tensor]:
+    def _allocate_kv_cache(self, num_blocks: int,
+                           device: str) -> List[torch.Tensor]:
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
@@ -88,6 +83,8 @@ class CacheEngine:
                             dtype=self.dtype,
                             pin_memory=pin_memory,
                             device=device))
+        if self.use_per_layer_attn_metadata:
+            kv_cache = {str(i): c for i, c in enumerate(kv_cache)}
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
