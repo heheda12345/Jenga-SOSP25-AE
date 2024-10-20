@@ -454,10 +454,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata inputs.
         if self.scheduler_config.use_per_layer_block_manager:
             self.attn_metadata_builders = {
-                layer_id: self.attn_backend.make_metadata_builder(
-                    weakref.proxy(self), layer_id,
-                    app_attn_metadata_builders[layer_id])
-                for layer_id in app_attn_metadata_builders
+                group_id: self.attn_backend.make_metadata_builder(
+                    weakref.proxy(self), group_id,
+                    app_attn_metadata_builders[group_id])
+                for group_id in app_attn_metadata_builders
             }
         else:
             self.attn_metadata_builders = {
@@ -885,10 +885,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.scheduler_config.use_per_layer_block_manager:
             # Run per-layer build here
             attn_metadata = {
-                layer_id:
+                group_id:
                 attn_metadata_builder.build(seq_lens, query_lens,
                                             cuda_graph_pad_size, batch_size)
-                for layer_id, attn_metadata_builder in
+                for group_id, attn_metadata_builder in
                 self.attn_metadata_builders.items()
             }
         else:
@@ -1487,6 +1487,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     kv_cache = kv_caches[virtual_engine]
                     if self.use_per_layer_attn_metadata:
                         if self.scheduler_config.use_per_layer_block_manager:
+                            raise NotImplementedError  # convert group_id to block_id # TODO: * groupsize
                             attn_metadata = {
                                 layer_id: self.attn_state.
                                 graph_capture_get_metadata_for_batch(

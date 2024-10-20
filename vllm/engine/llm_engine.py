@@ -491,6 +491,9 @@ class LLMEngine:
         if custom_block_manager is not None:
             available_gpu_memory, available_cpu_memory = self.model_executor.get_available_memory(
             )
+            logger.info("Available GPU memory: %d GB, CPU memory: %d GB",
+                        available_gpu_memory / 2**30,
+                        available_cpu_memory / 2**30)
             custom_block_manager.compile(available_cpu_memory,
                                          available_gpu_memory)
             self.model_executor.initialize_cache_from_kv_cache_config(

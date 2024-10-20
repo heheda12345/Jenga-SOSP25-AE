@@ -117,29 +117,33 @@ class CustomBlockManager:
             groups = group_result[page_size]  # {app_property -> [layer_id]}
             group_sizes = [len(layers) for layers in groups.values()]
             group_size_gcd = math.gcd(*group_sizes)
-            num_pages = get_num_pages(available_num_elements, page_size)
+            allocator_page_size = page_size * group_size_gcd
+            num_pages = get_num_pages(available_num_elements,
+                                      allocator_page_size)
 
             unique_id = UniqueID()
 
-            kv_cache_config = KVCacheConfig(buffer_size=num_pages * page_size,
-                                            buffer_dtype=dtype,
-                                            component_config={},
-                                            attn_meta_sharing={})
+            kv_cache_config = KVCacheConfig(
+                buffer_size=num_pages * allocator_page_size,
+                buffer_dtype=dtype,
+                level0_page_size=allocator_page_size,
+                components={},
+                block_table_sharing={})
+            num_pages -= 1  # to avoid overflow due to start_bias
 
             for app_property, layers in groups.items():
                 for i in range(0, len(layers), group_size_gcd):
                     group_id = unique_id.get_group_id(app_property)
-                    kv_cache_config.attn_meta_sharing[group_id] = []
+                    kv_cache_config.block_table_sharing[group_id] = []
                     for idx_in_group, layer_id in enumerate(
                             layers[i:i + group_size_gcd]):
-                        kv_cache_config.attn_meta_sharing[group_id].append(
+                        kv_cache_config.block_table_sharing[group_id].append(
                             layer_id)
-                        kv_cache_config.component_config[
-                            layer_id] = KVPageType(
-                                start_bias=idx_in_group * page_size,
-                                end_bias=(idx_in_group + 1) * page_size,
-                                page_size=page_size,
-                            )
+                        kv_cache_config.components[layer_id] = KVPageType(
+                            start_bias=idx_in_group * page_size,
+                            num_elements=num_pages * allocator_page_size,
+                            page_size=page_size,
+                        )
             print("kv_cache_config", kv_cache_config)
             return kv_cache_config
 
@@ -172,7 +176,9 @@ class CustomBlockManager:
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
         total_blocks = 0
-        for id, manager in self._app_aware_managers.items():
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
             num_blocks = manager.get_num_required_blocks(
                 seq_group, num_lookahead_slots)
             total_blocks += num_blocks
@@ -183,10 +189,12 @@ class CustomBlockManager:
             self, seq_group: SequenceGroup,
             allocator: DeviceAwareBlockAllocator) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
-        for layer_id, manager in self._app_aware_managers.items():
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
             block = manager.allocate_sequence(seq_group, allocator)
             if block is not None:
-                block_table[layer_id] = block
+                block_table[group_id] = block
         return block_table
 
     @require_kv_config_init
@@ -194,17 +202,21 @@ class CustomBlockManager:
             self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
             num_lookahead_slots: int) -> int:
         total_blocks = 0
-        for layer_id, manager in self._app_aware_managers.items():
-            assert layer_id in block_table
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            assert group_id in block_table
             num_blocks = manager.get_num_blocks_touched_by_append_slots(
-                seq, block_table[layer_id], num_lookahead_slots)
+                seq, block_table[group_id], num_lookahead_slots)
             total_blocks += num_blocks
         return total_blocks
 
     @require_kv_config_init
     def append_token_ids(self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
                          num_lookahead_slots: int) -> int:
-        for layer_id, manager in self._app_aware_managers.items():
-            assert layer_id in block_table
-            manager.append_token_ids(seq, block_table[layer_id],
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            assert group_id in block_table
+            manager.append_token_ids(seq, block_table[group_id],
                                      num_lookahead_slots)

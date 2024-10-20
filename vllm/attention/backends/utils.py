@@ -126,7 +126,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
     def __init__(self,
                  input_builder: "ModelInputForGPUBuilder",
-                 layer_id: Optional[int] = None,
+                 group_id: Optional[int] = None,
                  app_attn_metadata_builder: Optional[
                      "AppAwareAttnMetadataBuilder"] = None):
         self.slot_mapping: List[int] = []
@@ -148,11 +148,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.use_per_layer_block_manager = (
             input_builder.scheduler_config.use_per_layer_block_manager)
 
-        self.layer_id = layer_id
+        self.group_id = group_id
         self.app_attn_metadata_builder = app_attn_metadata_builder
         if self.use_per_layer_block_manager:
             assert self.app_attn_metadata_builder is not None
-            assert self.layer_id is not None
+            assert self.group_id is not None
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -189,7 +189,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 elif chunked_prefill_enabled:
                     raise NotImplementedError
                 elif (not is_prompt and block_tables is not None):
-                    block_table = block_tables[seq_id][self.layer_id]
+                    block_table = block_tables[seq_id][self.group_id]
                     if curr_sliding_window_block > 0:
                         raise NotImplementedError
                 else:
@@ -213,7 +213,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             if is_profile_run:
                 block_table = None
             elif self.use_per_layer_block_manager:
-                block_table = inter_data.block_tables[seq_id][self.layer_id]
+                block_table = inter_data.block_tables[seq_id][self.group_id]
             else:
                 block_table = inter_data.block_tables[seq_id]
 
@@ -350,11 +350,11 @@ class CommonAttentionState(AttentionState):
             self,
             batch_size: int,
             is_encoder_decoder_model: bool = False,
-            layer_id: Optional[int] = None) -> Dict[str, Any]:
+            group_id: Optional[int] = None) -> Dict[str, Any]:
         assert self._is_graph_capturing
-        if layer_id is None:
-            layer_id = 0
-        pre_alloc_tensors = self._pre_alloc_tensors[layer_id]
+        if group_id is None:
+            group_id = 0
+        pre_alloc_tensors = self._pre_alloc_tensors[group_id]
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
             num_prefill_tokens=0,
@@ -389,12 +389,12 @@ class CommonAttentionState(AttentionState):
             is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
         if isinstance(attn_metadata, dict):
             per_layer_attn_meta_buffer = {
-                layer_id: {
+                group_id: {
                     "slot_mapping": attn.slot_mapping,
                     "seq_lens_tensor": attn.decode_metadata.seq_lens_tensor,
                     "block_tables": attn.decode_metadata.block_tables,
                 }
-                for layer_id, attn in attn_metadata.items()
+                for group_id, attn in attn_metadata.items()
             }
             if is_encoder_decoder_model:
                 raise NotImplementedError
@@ -426,12 +426,12 @@ class CommonAttentionState(AttentionState):
         if isinstance(attn_metadata, dict):
             per_layer_attn_meta_buffer = input_buffers[
                 "per_layer_attn_metadata"]
-            for layer_id, attn in attn_metadata.items():
-                per_layer_attn_meta_buffer[layer_id]["slot_mapping"].copy_(
+            for group_id, attn in attn_metadata.items():
+                per_layer_attn_meta_buffer[group_id]["slot_mapping"].copy_(
                     attn.slot_mapping, non_blocking=True)
-                per_layer_attn_meta_buffer[layer_id]["seq_lens_tensor"].copy_(
+                per_layer_attn_meta_buffer[group_id]["seq_lens_tensor"].copy_(
                     attn.decode_metadata.seq_lens_tensor, non_blocking=True)
-                per_layer_attn_meta_buffer[layer_id]["block_tables"].copy_(
+                per_layer_attn_meta_buffer[group_id]["block_tables"].copy_(
                     attn.decode_metadata.block_tables, non_blocking=True)
             if is_encoder_decoder_model:
                 raise NotImplementedError

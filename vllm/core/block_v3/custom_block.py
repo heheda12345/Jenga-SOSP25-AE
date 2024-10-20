@@ -12,16 +12,6 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, Device, cdiv, chunk_list, get_d
 from vllm.logger import init_logger
 
 
-# TODO: should we call BlockTable's function here?
-def require_kv_config_init(func):
-
-    def wrapper(self, *args, **kwargs):
-        assert self.initialized, "KV cache config is not initialized"
-        return func(self, *args, **kwargs)
-
-    return wrapper
-
-
 class AppAwareManager:
 
     def __init__(self, dtype: torch.dtype):
@@ -45,7 +35,6 @@ class AppAwareManager:
         pass
 
     @abstractmethod
-    @require_kv_config_init
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
@@ -55,14 +44,12 @@ class AppAwareManager:
         pass
 
     @abstractmethod
-    @require_kv_config_init
     def allocate_sequence(
             self, seq_group: SequenceGroup,
             block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
         pass
 
     @abstractmethod
-    @require_kv_config_init
     def get_num_blocks_touched_by_append_slots(
             self, seq: Sequence, block_table: BlockTable,
             num_lookahead_slots: int) -> int:
@@ -82,8 +69,8 @@ def get_token_size_default(model_config: ModelConfig,
     key_cache_block = num_heads * head_size
     value_cache_block = key_cache_block
     total = num_attention_layers * (key_cache_block + value_cache_block)
-    dtype_size = get_dtype_size(dtype)
-    return dtype_size * total
+    # dtype_size = get_dtype_size(dtype)
+    return total
 
 
 def get_dtype(cache_dtype: str, model_config: ModelConfig) -> torch.dtype:
@@ -109,7 +96,6 @@ class SelfAttentionManager(AppAwareManager):
     def get_app_property(self) -> str:
         return "self_attention"
 
-    @require_kv_config_init
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
@@ -117,7 +103,6 @@ class SelfAttentionManager(AppAwareManager):
         num_tokens = len(seq.get_token_ids())
         return cdiv(num_tokens, self.block_size) + num_lookahead_slots
 
-    @require_kv_config_init
     def allocate_sequence(
             self, seq_group: SequenceGroup,
             block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
@@ -129,7 +114,6 @@ class SelfAttentionManager(AppAwareManager):
 
         return block_table
 
-    @require_kv_config_init
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
                                                block_table: BlockTable,
                                                num_lookahead_slots: int):
@@ -144,7 +128,6 @@ class SelfAttentionManager(AppAwareManager):
             (num_token_ids - first_chunk_size) / self.block_size))
         return num_token_blocks
 
-    @require_kv_config_init
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
                          num_lookahead_slots: int):
         assert block_table._block_size == self.block_size
@@ -183,7 +166,6 @@ class EncoderDecoderManager(AppAwareManager):
     def get_app_property(self) -> str:
         return "encoder_decoder"
 
-    @require_kv_config_init
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 _num_lookahead_slots: int = 0) -> int:
@@ -195,7 +177,6 @@ class EncoderDecoderManager(AppAwareManager):
         else:
             return 0
 
-    @require_kv_config_init
     def allocate_sequence(
             self, seq_group: SequenceGroup,
             block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
@@ -210,13 +191,11 @@ class EncoderDecoderManager(AppAwareManager):
             block_table.allocate(encoder_seq_token_ids)
         return block_table
 
-    @require_kv_config_init
     def get_num_blocks_touched_by_append_slots(self, seq, block_table,
                                                num_lookahead_slots):
         # Encoder-decoder KV cache size is not changed during decoding
         return 0
 
-    @require_kv_config_init
     def append_token_ids(self, seq, block_table, num_lookahead_slots):
         # Encoder-decoder KV cache size is not changed during decoding
         pass
@@ -248,7 +227,6 @@ class SlidingWindowManager(AppAwareManager):
     def get_app_property(self) -> str:
         return f"sliding_window_{self.sliding_window_size}"
 
-    @require_kv_config_init
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
@@ -260,7 +238,6 @@ class SlidingWindowManager(AppAwareManager):
                                   self.max_block_sliding_window)
         return num_required_blocks
 
-    @require_kv_config_init
     def allocate_sequence(
             self, seq_group: SequenceGroup,
             block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
@@ -275,7 +252,6 @@ class SlidingWindowManager(AppAwareManager):
 
         return block_table
 
-    @require_kv_config_init
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
                                                block_table: BlockTable,
                                                num_lookahead_slots: int):
@@ -291,7 +267,6 @@ class SlidingWindowManager(AppAwareManager):
             (num_token_ids - first_chunk_size) / self.block_size))
         return num_token_blocks
 
-    @require_kv_config_init
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
                          num_lookahead_slots: int):
         assert block_table._block_size == self.block_size

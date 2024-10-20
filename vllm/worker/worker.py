@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Set, Tuple, Type, Union
 import torch
 import torch.distributed
 
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
@@ -23,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.cache_engine import CacheEngine, CacheEngineV3
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -230,8 +231,18 @@ class Worker(LocalOrDistributedWorkerBase):
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+        print("peak_memory", peak_memory / 1024 / 1024 / 1024)
+        print("total_gpu_memory", total_gpu_memory / 1024 / 1024 / 1024)
+        print("self.cache_config.gpu_memory_utilization",
+              self.cache_config.gpu_memory_utilization)
+
         available_gpu_memory = total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory
         available_cpu_memory = self.cache_config.swap_space_bytes
+
+        if self.model_runner.lora_manager:
+            self.model_runner.remove_all_loras()
+        gc.collect()
+        torch.cuda.empty_cache()
 
         return int(available_gpu_memory), int(available_cpu_memory)
 
@@ -323,16 +334,26 @@ class Worker(LocalOrDistributedWorkerBase):
         self._warm_up_model()
 
     def _init_cache_engine(self, kv_cache_config: Optional[KVCacheConfig]):
-        assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [
-            CacheEngine(
-                self.cache_config,
-                self.model_config,
-                self.parallel_config,
-                self.device_config,
-                kv_cache_config,
-            ) for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        if self.scheduler_config.use_per_layer_block_manager:
+            self.cache_engine = [
+                CacheEngineV3(
+                    self.cache_config,
+                    self.model_config,
+                    self.parallel_config,
+                    self.device_config,
+                    kv_cache_config,
+                ) for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+        else:
+            assert self.cache_config.num_gpu_blocks is not None
+            self.cache_engine = [
+                CacheEngine(
+                    self.cache_config,
+                    self.model_config,
+                    self.parallel_config,
+                    self.device_config,
+                ) for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)

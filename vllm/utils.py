@@ -134,6 +134,12 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
 }
 
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.half: "half",
+    torch.bfloat16: "bfloat16",
+    torch.float: "float",
+}
+
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float16: np.float16,
     torch.float32: np.float32,

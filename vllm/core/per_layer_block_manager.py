@@ -19,16 +19,17 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
     def __init__(
         self,
         block_size: int,
-        num_gpu_blocks: int,
-        num_cpu_blocks: int,
         custom_block_manager: CustomBlockManager,
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
     ) -> None:
         self.block_size = block_size
-        self.num_total_gpu_blocks = num_gpu_blocks
-        self.num_total_cpu_blocks = num_cpu_blocks
+        self.custom_block_manager = custom_block_manager
+        self.enable_caching = enable_caching
+
+        self.num_total_gpu_blocks = self.custom_block_manager.kv_cache_config.buffer_size // self.custom_block_manager.kv_cache_config.level0_page_size
+        self.num_total_cpu_blocks = 0
         if sliding_window is not None:
             logger.warning("sliding_window can be deprecated in the future.")
         if enable_caching:
@@ -36,21 +37,17 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
 
         self.global_block_allocator = CpuGpuBlockAllocator.create(
             allocator_type="prefix_caching" if enable_caching else "naive",
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
+            num_gpu_blocks=self.num_total_gpu_blocks,
+            num_cpu_blocks=self.num_total_cpu_blocks,
             block_size=block_size,
         )
 
-        self.custom_block_manager = custom_block_manager
-
-        self.enable_caching = enable_caching
-
-        self.watermark_blocks = int(watermark * num_gpu_blocks)
+        self.watermark_blocks = int(watermark * self.num_total_gpu_blocks)
         logger.info(
             "############### create PerlayerBlockSpaceManager, block_size: {}, page size: {}"
             .format(
                 block_size,
-                self.custom_block_manager.kv_cache_config.block_size_bytes), )
+                self.custom_block_manager.kv_cache_config.level0_page_size), )
 
         self.block_tables: Dict[SeqId, CUSTOM_BLOCK_TABLE] = {}
 

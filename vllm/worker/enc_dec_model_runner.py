@@ -265,11 +265,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_positions_tensor,
         ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list)
         if self.scheduler_config.use_per_layer_block_manager:
-            for layer_id, attn_metadata in model_input.attn_metadata.items():
-                if isinstance(self.app_attn_metadata_builders[layer_id],
+            for group_id, attn_metadata in model_input.attn_metadata.items():
+                if isinstance(self.app_attn_metadata_builders[group_id],
                               EncoderDecoderManager):
                     self._update_encoder_model_attn_metadata(
-                        attn_metadata, seq_group_metadata_list, layer_id)
+                        attn_metadata, seq_group_metadata_list, group_id)
         elif self.use_per_layer_attn_metadata:
             # if not using per-layer block manager, the attn_metadata of
             # different layers are the same object, so we only update the first
@@ -428,7 +428,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         self,
         attn_metadata: AttentionMetadata,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        layer_id: Optional[int],
+        group_id: Optional[str],
     ):
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
@@ -496,7 +496,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     # In embeddings, the block tables are {seq_id: None}.
                     cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
-                    if layer_id is None:
+                    if group_id is None:
                         # using v2_block_manager
                         cross_block_table = seq_group_metadata.cross_block_table
                     else:
@@ -504,7 +504,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                         seq_id = next(iter(seq_group_metadata.block_tables))
                         # using per_layer_block_manager
                         cross_block_table = seq_group_metadata.block_tables[
-                            seq_id][layer_id]
+                            seq_id][group_id]
                     for i in range(0, seq_len):
                         block_number = cross_block_table[i // self.block_size]
                         block_offset = i % self.block_size
@@ -523,7 +523,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # during vLLM memory profiling.
             cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
-                if layer_id is None:
+                if group_id is None:
                     # using v2_block_manager
                     cross_block_table = seq_group_metadata.cross_block_table
                 else:
@@ -531,7 +531,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     assert len(seq_group_metadata.block_tables) == 1
                     seq_id = next(iter(seq_group_metadata.block_tables))
                     cross_block_table = seq_group_metadata.block_tables[
-                        seq_id][layer_id]
+                        seq_id][group_id]
                 for _ in range(len(seq_group_metadata.seq_data)):
                     encoder_seq_lens.append(
                         seq_group_metadata.encoder_seq_data.get_len())

@@ -647,25 +647,17 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
+BufferType = Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+
+
 class ComponentType(msgspec.Struct, omit_defaults=True, array_like=True):
     start_bias: int
-    end_bias: int
+    num_elements: int
     page_size: int  # number of elements in a page
-
-    @abstractmethod
-    def format_tensor(
-        self, buffer: torch.Tensor
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        pass
 
 
 class KVPageType(ComponentType):
-
-    def format_tensor(
-        self, buffer: torch.Tensor
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        raise NotImplementedError(
-            "format_tensor is not implemented for KVPage")
+    pass
 
 
 class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
@@ -673,14 +665,15 @@ class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     # so keep it out of CacheConfig
     buffer_size: int
     buffer_dtype: torch.dtype
-    component_config: Dict[str, ComponentType]  # layer_id -> ComponentType
-    attn_meta_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
+    level0_page_size: int
+    components: Dict[str, ComponentType]  # layer_id -> ComponentType
+    block_table_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
 
 
 class SchedulerKVCacheConfig:
     memory_config: dict[str, int]  # type_id -> memory_size
     type_of_group: dict[str, str]  # group_id -> type_id
-    attn_meta_sharing: dict[str, list[str]]  # group_id -> List[layer_id]
+    block_table_sharing: dict[str, list[str]]  # group_id -> List[layer_id]
 
 
 @dataclass
@@ -1498,8 +1491,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method
-                != 'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "

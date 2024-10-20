@@ -325,25 +325,23 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
-        num_gpu_blocks = cache_config.num_gpu_blocks
-        if num_gpu_blocks:
-            num_gpu_blocks //= pipeline_parallel_size
-
-        num_cpu_blocks = cache_config.num_cpu_blocks
-        if num_cpu_blocks:
-            num_cpu_blocks //= pipeline_parallel_size
-
         # Create the block space manager.
         if version == "v3":
             assert custom_block_manager is not None
             assert BlockSpaceManagerImpl == PerlayerBlockSpaceManager
             self.block_manager = PerlayerBlockSpaceManager(
                 block_size=self.cache_config.block_size,
-                num_gpu_blocks=num_gpu_blocks,
-                num_cpu_blocks=num_cpu_blocks,
                 enable_caching=self.cache_config.enable_prefix_caching,
                 custom_block_manager=custom_block_manager)
         else:
+            num_gpu_blocks = cache_config.num_gpu_blocks
+            if num_gpu_blocks:
+                num_gpu_blocks //= pipeline_parallel_size
+
+            num_cpu_blocks = cache_config.num_cpu_blocks
+            if num_cpu_blocks:
+                num_cpu_blocks //= pipeline_parallel_size
+
             self.block_manager = BlockSpaceManagerImpl(
                 block_size=self.cache_config.block_size,
                 num_gpu_blocks=num_gpu_blocks,

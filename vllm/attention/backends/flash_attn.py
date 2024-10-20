@@ -64,6 +64,18 @@ class FlashAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_kv_cache_layout(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def page_is_leading_dim() -> bool:
+        return False
+
+    @staticmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
@@ -295,7 +307,7 @@ class FlashAttentionMetadataBuilder(
 
     def __init__(self,
                  input_builder: "ModelInputForGPUBuilder",
-                 layer_id: Optional[int] = None,
+                 group_id: Optional[str] = None,
                  app_attn_metadata_builder: Optional[
                      "AppAwareAttnMetadataBuilder"] = None):
         self.slot_mapping: List[int] = []
@@ -318,11 +330,11 @@ class FlashAttentionMetadataBuilder(
         self.use_per_layer_block_manager = (
             input_builder.scheduler_config.use_per_layer_block_manager)
 
-        self.layer_id = layer_id
+        self.group_id = group_id
         self.app_attn_metadata_builder = app_attn_metadata_builder
         if self.use_per_layer_block_manager:
             assert self.app_attn_metadata_builder is not None
-            assert self.layer_id is not None
+            assert self.group_id is not None
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -362,14 +374,14 @@ class FlashAttentionMetadataBuilder(
                 elif chunked_prefill_enabled:
                     raise NotImplementedError
                 elif (not is_prompt and block_tables is not None):
-                    block_table = block_tables[seq_id][self.layer_id]
+                    block_table = block_tables[seq_id][self.group_id]
                     if curr_sliding_window_block != 0 and isinstance(
                             self.app_attn_metadata_builder,
                             SlidingWindowManager):
                         block_table = block_tables[seq_id][
-                            self.layer_id][-curr_sliding_window_block:]
+                            self.group_id][-curr_sliding_window_block:]
                     else:
-                        block_table = block_tables[seq_id][self.layer_id]
+                        block_table = block_tables[seq_id][self.group_id]
                 self.block_tables.append(block_table)
             else:
                 if prefix_cache_hit:
@@ -394,7 +406,7 @@ class FlashAttentionMetadataBuilder(
             if is_profile_run:
                 block_table = None
             elif self.use_per_layer_block_manager:
-                block_table = inter_data.block_tables[seq_id][self.layer_id]
+                block_table = inter_data.block_tables[seq_id][self.group_id]
             else:
                 block_table = inter_data.block_tables[seq_id]
 

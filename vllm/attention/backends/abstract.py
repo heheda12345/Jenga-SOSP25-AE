@@ -68,6 +68,20 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_kv_cache_layout(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def page_is_leading_dim() -> bool:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
