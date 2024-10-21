@@ -371,9 +371,8 @@ class FlashAttentionMetadataBuilder(
             if self.use_per_layer_block_manager:
                 if prefix_cache_hit:
                     raise NotImplementedError
-                elif chunked_prefill_enabled:
-                    raise NotImplementedError
-                elif (not is_prompt and block_tables is not None):
+                elif ((chunked_prefill_enabled or not is_prompt)
+                      and block_tables is not None):
                     block_table = block_tables[seq_id][self.group_id]
                     if curr_sliding_window_block != 0 and isinstance(
                             self.app_attn_metadata_builder,

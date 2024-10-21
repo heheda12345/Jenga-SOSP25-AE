@@ -1602,21 +1602,23 @@ class LLMEngine:
             len(scheduler.waiting) for scheduler in self.scheduler)
 
         # KV Cache Usage in %
-        num_total_gpu = self.cache_config.num_gpu_blocks
-        gpu_cache_usage_sys = 0.
-        if num_total_gpu is not None:
-            num_free_gpu = sum(
-                scheduler.block_manager.get_num_free_gpu_blocks()
-                for scheduler in self.scheduler)
-            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
-
-        num_total_cpu = self.cache_config.num_cpu_blocks
-        cpu_cache_usage_sys = 0.
-        if num_total_cpu is not None and num_total_cpu > 0:
-            num_free_cpu = sum(
-                scheduler.block_manager.get_num_free_cpu_blocks()
-                for scheduler in self.scheduler)
-            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+        # TODO: support KV Cache Usage
+        # num_total_gpu = self.cache_config.num_gpu_blocks
+        # gpu_cache_usage_sys = 0.
+        # if num_total_gpu is not None:
+        #     num_free_gpu = sum(
+        #         scheduler.block_manager.get_num_free_gpu_blocks()
+        #         for scheduler in self.scheduler)
+        #     gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 0
+        # num_total_cpu = self.cache_config.num_cpu_blocks
+        # cpu_cache_usage_sys = 0.
+        # if num_total_cpu is not None and num_total_cpu > 0:
+        #     num_free_cpu = sum(
+        #         scheduler.block_manager.get_num_free_cpu_blocks()
+        #         for scheduler in self.scheduler)
+        #     cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+        cpu_cache_usage_sys = 0
 
         # Prefix Cache Hit Rate. Note that we always use
         # the cache hit rate of the first virtual engine.

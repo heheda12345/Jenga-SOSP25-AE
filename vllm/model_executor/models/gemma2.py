@@ -55,16 +55,13 @@ def custom_block_manager_for_gemma2(model_config: ModelConfig,
     sliding_window = model_config.get_sliding_window()
     for i in range(model_config.get_num_layers(parallel_config)):
         if i % 2 == 0 and sliding_window is not None:
-            custom_managers[i] = SlidingWindowManager(model_config,
-                                                      parallel_config,
-                                                      cache_config.cache_dtype,
-                                                      cache_config.block_size,
-                                                      sliding_window)
+            custom_managers[str(i)] = SlidingWindowManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size, sliding_window)
         else:
-            custom_managers[i] = SelfAttentionManager(model_config,
-                                                      parallel_config,
-                                                      cache_config.cache_dtype,
-                                                      cache_config.block_size)
+            custom_managers[str(i)] = SelfAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
     return custom_managers
 
 
@@ -179,7 +176,7 @@ class Gemma2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        layer_id: Optional[int] = None,
+        layer_id: str,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -242,7 +239,7 @@ class Gemma2DecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-        layer_id: Optional[int] = None,
+        layer_id: str,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -321,13 +318,14 @@ class Gemma2Model(nn.Module):
             residual = intermediate_tensors["residual"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+            layer_id = str(i)
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata[i - self.start_layer],
+                kv_caches[layer_id],
+                attn_metadata[layer_id],
                 residual,
-                i - self.start_layer,
+                layer_id,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
