@@ -196,20 +196,19 @@ def _prepare_aspect_ratio_attention_mask(
 
 def custom_block_manager_for_mllama(
         model_config: config_mllama.MllamaConfig, cache_config: CacheConfig,
-        parallel_config: ParallelConfig) -> Dict[int, AppAwareManager]:
+        parallel_config: ParallelConfig) -> Dict[str, AppAwareManager]:
     cross_attention_layers = model_config.hf_config.\
         text_config.cross_attention_layers
     custom_managers = {}
     for i in range(model_config.hf_config.text_config.num_hidden_layers):
         if i in cross_attention_layers:
-            custom_managers[i] = EncoderDecoderManager(
+            custom_managers[str(i)] = EncoderDecoderManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.block_size)
         else:
-            custom_managers[i] = SelfAttentionManager(model_config,
-                                                      parallel_config,
-                                                      cache_config.cache_dtype,
-                                                      cache_config.block_size)
+            custom_managers[str(i)] = SelfAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
     return custom_managers
 
 
@@ -644,7 +643,6 @@ class MllamaTextCrossAttention(nn.Module):
     def __init__(
         self,
         config: Optional[config_mllama.MllamaTextConfig] = None,
-        layer_idx: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -658,7 +656,6 @@ class MllamaTextCrossAttention(nn.Module):
         self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
-        self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.q_local_size = self.num_local_heads * self.head_dim
         self.kv_local_size = self.num_local_key_value_heads * self.head_dim
@@ -699,6 +696,7 @@ class MllamaTextCrossAttention(nn.Module):
         cross_attention_states: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        layer_id: str,
     ) -> torch.Tensor:
         qkv_dec, _ = self.qkv_proj(hidden_states)
         q, _, _ = qkv_dec.split(
@@ -723,7 +721,8 @@ class MllamaTextCrossAttention(nn.Module):
                            v,
                            kv_cache,
                            attn_metadata,
-                           attn_type=AttentionType.ENCODER_DECODER)
+                           attn_type=AttentionType.ENCODER_DECODER,
+                           layer_id=layer_id)
         out, _ = self.o_proj(output)
         return out
 
@@ -739,7 +738,6 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         self.layer_idx = layer_idx
         self.cross_attn = MllamaTextCrossAttention(
             config=config,
-            layer_idx=layer_idx,
             quant_config=quant_config,
         )
 
@@ -757,15 +755,12 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
                                                 eps=config.rms_norm_eps)
         self.cross_attn_mlp_gate = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        cross_attention_states: torch.Tensor,
-        cross_attention_mask: torch.Tensor,
-        full_text_row_masked_out_mask: torch.Tensor,
-        kv_cache: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor,
+                cross_attention_states: torch.Tensor,
+                cross_attention_mask: torch.Tensor,
+                full_text_row_masked_out_mask: torch.Tensor,
+                kv_cache: List[torch.Tensor], attn_metadata: AttentionMetadata,
+                layer_id: str) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -775,6 +770,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             cross_attention_states=cross_attention_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            layer_id=layer_id,
         )
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh(
@@ -805,24 +801,24 @@ class MllamaTextModel(nn.Module):
 
         layers = []
 
-        self.first_decoder_layer_id = -1
-        self.first_cross_attention_layer_id = -1
+        self.first_decoder_layer_id = ""
+        self.first_cross_attention_layer_id = ""
 
         for layer_idx in range(config.num_hidden_layers):
             if layer_idx in self.cross_attention_layers:
                 layers.append(
                     MllamaCrossAttentionDecoderLayer(
                         config, layer_idx, quant_config=quant_config))
-                if self.first_cross_attention_layer_id == -1:
-                    self.first_cross_attention_layer_id = layer_idx
+                if self.first_cross_attention_layer_id == "":
+                    self.first_cross_attention_layer_id = str(layer_idx)
             else:
                 # TODO: force LlamaDecoderLayer to config.attention_bias=False
                 layers.append(
                     LlamaDecoderLayer(config,
                                       cache_config=cache_config,
                                       quant_config=quant_config))
-                if self.first_decoder_layer_id == -1:
-                    self.first_decoder_layer_id = layer_idx
+                if self.first_decoder_layer_id == "":
+                    self.first_decoder_layer_id = str(layer_idx)
 
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -834,12 +830,6 @@ class MllamaTextModel(nn.Module):
     def get_cross_attn_metadata(
             self, attn_metadata: AttentionMetadata) -> AttentionMetadata:
         return attn_metadata[self.first_cross_attention_layer_id]
-
-    def get_attn_metadata(self, attn_metadata: AttentionMetadata,
-                          layer_id: int) -> AttentionMetadata:
-        if isinstance(attn_metadata, dict):
-            return attn_metadata[layer_id]
-        return attn_metadata
 
     def forward(
         self,
@@ -857,6 +847,7 @@ class MllamaTextModel(nn.Module):
         hidden_states = inputs_embeds
 
         for idx, decoder_layer in enumerate(self.layers):
+            layer_id = str(idx)
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
                 if not skip_cross_attention:
                     hidden_states = decoder_layer(
@@ -865,17 +856,18 @@ class MllamaTextModel(nn.Module):
                         cross_attention_mask=cross_attention_mask,
                         full_text_row_masked_out_mask=
                         full_text_row_masked_out_mask,
-                        kv_cache=kv_caches[idx],
-                        attn_metadata=self.get_attn_metadata(
-                            attn_metadata, idx),
+                        kv_cache=kv_caches[layer_id],
+                        attn_metadata=attn_metadata[layer_id],
+                        layer_id=layer_id,
                     )
             elif isinstance(decoder_layer, LlamaDecoderLayer):
                 hidden_states, residual = decoder_layer(
                     positions=positions,
                     hidden_states=hidden_states,
-                    kv_cache=kv_caches[idx],
-                    attn_metadata=attn_metadata[idx],
+                    kv_cache=kv_caches[layer_id],
+                    attn_metadata=attn_metadata[layer_id],
                     residual=None,
+                    layer_id=layer_id,
                 )
                 hidden_states = hidden_states + residual
             else:
@@ -1147,7 +1139,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             skip_cross_attention = False
             # TODO: support multi-image by this mask
             cross_attention_mask = None
-
         outputs = self.language_model(
             input_ids=input_ids,
             positions=positions,

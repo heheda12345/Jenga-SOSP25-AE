@@ -62,6 +62,26 @@ class PagedAttention:
         return key_cache, value_cache
 
     @staticmethod
+    def split_kv_cache_tuple(
+        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        key_cache = kv_cache[0]
+        value_cache = kv_cache[1]
+
+        if key_cache.numel() == 0:
+            return key_cache, value_cache
+
+        x = 16 // key_cache.element_size()
+
+        num_blocks = key_cache.shape[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
+                                   -1, x)
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, value_cache
+
+    @staticmethod
     def write_to_paged_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -82,6 +102,18 @@ class PagedAttention:
             k_scale,
             v_scale,
         )
+
+    @staticmethod
+    def get_kv_cache_layout(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (block_size * num_kv_heads * head_size, )
+
+    @staticmethod
+    def page_is_leading_dim() -> bool:
+        return False
 
     @staticmethod
     def forward_decode(

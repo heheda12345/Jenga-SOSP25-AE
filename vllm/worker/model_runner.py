@@ -454,7 +454,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata inputs.
         if self.scheduler_config.use_per_layer_block_manager:
             self.attn_metadata_builders = {
-                group_id: self.attn_backend.make_metadata_builder(
+                group_id:
+                self.attn_backend.make_metadata_builder(
                     weakref.proxy(self), group_id,
                     app_attn_metadata_builders[group_id])
                 for group_id in app_attn_metadata_builders
@@ -1347,18 +1348,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 kv_cache_config = self.kv_cache_config
                 assert kv_cache_config is not None
                 kv_caches = {
-                    layer_id: torch.tensor([],
-                                           dtype=kv_cache_config.buffer_dtype,
-                                           device=self.device)
+                    layer_id:
+                    torch.tensor([],
+                                 dtype=kv_cache_config.buffer_dtype,
+                                 device=self.device)
                     for layer_ids in
                     kv_cache_config.block_table_sharing.values()
                     for layer_id in layer_ids
                 }
             else:
                 kv_caches = {
-                    str(layer_id): torch.tensor([],
-                                                dtype=torch.float32,
-                                                device=self.device)
+                    str(layer_id):
+                    torch.tensor([], dtype=torch.float32, device=self.device)
                     for layer_id in range(num_layers)
                 }
         else:
@@ -1524,7 +1525,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     kv_cache = kv_caches[virtual_engine]
                     if self.scheduler_config.use_per_layer_block_manager:
                         attn_metadata = {
-                            group_id: self.attn_state.
+                            group_id:
+                            self.attn_state.
                             graph_capture_get_metadata_for_batch(
                                 batch_size,
                                 is_encoder_decoder_model=self.model_config.

@@ -11,9 +11,9 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.core.block_v3.custom_block import EncoderDecoderManager
 from vllm.core.block_v3.registry import (BlockManagerRegistry,
                                          BLOCK_MANAGER_REGISTRY)
@@ -95,6 +95,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        kv_cache_config: Optional[KVCacheConfig] = None,
     ):
         '''
         EncoderDecoderModelRunner constructor.
@@ -117,6 +118,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             lora_config=None,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
+            kv_cache_config=kv_cache_config,
         )
 
         # Crash for unsupported encoder/scenarios
@@ -200,12 +202,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
 
-        if self.scheduler_config.use_per_layer_block_manager:
-            kv_caches = [
-                kv_caches[0] for _layer_id in range(
-                    self.model_config.get_num_layers(self.parallel_config))
-            ]
-
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         with set_forward_context(model_input.attn_metadata):
             hidden_or_intermediate_states = model_executable(
@@ -265,16 +261,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_positions_tensor,
         ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list)
         if self.scheduler_config.use_per_layer_block_manager:
-            for group_id, attn_metadata in model_input.attn_metadata.items():
+            for group_id, layer_ids in self.kv_cache_config.block_table_sharing.items(
+            ):
                 if isinstance(self.app_attn_metadata_builders[group_id],
                               EncoderDecoderManager):
                     self._update_encoder_model_attn_metadata(
-                        attn_metadata, seq_group_metadata_list, group_id)
+                        model_input.attn_metadata[layer_ids[0]],
+                        seq_group_metadata_list, group_id)
         elif self.use_per_layer_attn_metadata:
             # if not using per-layer block manager, the attn_metadata of
             # different layers are the same object, so we only update the first
             self._update_encoder_model_attn_metadata(
-                model_input.attn_metadata[0], seq_group_metadata_list, None)
+                model_input.attn_metadata["0"], seq_group_metadata_list, None)
         else:
             self._update_encoder_model_attn_metadata(model_input.attn_metadata,
                                                      seq_group_metadata_list,
@@ -368,10 +366,30 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(num_layers)
-        ]
+        if self.use_per_layer_attn_metadata:
+            if self.scheduler_config.use_per_layer_block_manager:
+                kv_cache_config = self.kv_cache_config
+                assert kv_cache_config is not None
+                kv_caches = {
+                    layer_id:
+                    torch.tensor([],
+                                 dtype=kv_cache_config.buffer_dtype,
+                                 device=self.device)
+                    for layer_ids in
+                    kv_cache_config.block_table_sharing.values()
+                    for layer_id in layer_ids
+                }
+            else:
+                kv_caches = {
+                    str(layer_id):
+                    torch.tensor([], dtype=torch.float32, device=self.device)
+                    for layer_id in range(num_layers)
+                }
+        else:
+            kv_caches = [
+                torch.tensor([], dtype=torch.float32, device=self.device)
+                for _ in range(num_layers)
+            ]
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
@@ -505,6 +523,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                         # using per_layer_block_manager
                         cross_block_table = seq_group_metadata.block_tables[
                             seq_id][group_id]
+                        # TODO: check attn_backend.page_is_leading_dim is False
+                        cross_block_table = [2 * x for x in cross_block_table]
                     for i in range(0, seq_len):
                         block_number = cross_block_table[i // self.block_size]
                         block_offset = i % self.block_size
@@ -532,6 +552,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     seq_id = next(iter(seq_group_metadata.block_tables))
                     cross_block_table = seq_group_metadata.block_tables[
                         seq_id][group_id]
+                    # TODO: check attn_backend.page_is_leading_dim is False
+                    cross_block_table = [2 * x for x in cross_block_table]
                 for _ in range(len(seq_group_metadata.seq_data)):
                     encoder_seq_lens.append(
                         seq_group_metadata.encoder_seq_data.get_len())

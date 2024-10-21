@@ -194,6 +194,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                         raise NotImplementedError
                 else:
                     block_table = []
+                # TODO: check attn_backend.page_is_leading_dim is False
+                block_table = [2 * x for x in block_table]
                 self.block_tables.append(block_table)
             else:
                 block_table = []
@@ -214,6 +216,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 block_table = None
             elif self.use_per_layer_block_manager:
                 block_table = inter_data.block_tables[seq_id][self.group_id]
+                # TODO: check attn_backend.page_is_leading_dim is False
+                block_table = [2 * x for x in block_table]
             else:
                 block_table = inter_data.block_tables[seq_id]
 

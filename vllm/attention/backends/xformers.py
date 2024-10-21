@@ -53,6 +53,19 @@ class XFormersBackend(AttentionBackend):
                                                  num_kv_heads, head_size)
 
     @staticmethod
+    def get_kv_cache_layout(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return PagedAttention.get_kv_cache_layout(block_size, num_kv_heads,
+                                                  head_size)
+
+    @staticmethod
+    def page_is_leading_dim() -> bool:
+        return PagedAttention.page_is_leading_dim()
+
+    @staticmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
@@ -506,7 +519,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
         if (attn_type == AttentionType.ENCODER
@@ -531,7 +543,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
-        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
+        if (attn_type != AttentionType.ENCODER):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -539,10 +551,23 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            if isinstance(kv_cache, torch.Tensor):
+                if kv_cache.numel() > 0:
+                    key_cache, value_cache = PagedAttention.split_kv_cache(
+                        kv_cache, self.num_kv_heads, self.head_size)
+                else:
+                    key_cache = kv_cache
+                    value_cache = kv_cache
+            elif isinstance(kv_cache, (list, tuple)):
+                key_cache, value_cache = PagedAttention.split_kv_cache_tuple(
+                    kv_cache, self.num_kv_heads, self.head_size)
+            else:
+                raise ValueError(
+                    "kv_cache of type {} is not supported.".format(
+                        type(kv_cache)))
 
-            if (key is not None) and (value is not None):
+            if (key is not None) and (value
+                                      is not None) and key_cache.numel() > 0:
 
                 if attn_type == AttentionType.ENCODER_DECODER:
                     # Update cross-attention KV cache (prefill-only)
@@ -597,7 +622,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+            if key_cache.numel() == 0 or prefill_meta.block_tables.numel(
+            ) == 0:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
