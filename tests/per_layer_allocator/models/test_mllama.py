@@ -227,7 +227,6 @@ def _run_test(
 
 
 # text-only input is not supported now
-@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
