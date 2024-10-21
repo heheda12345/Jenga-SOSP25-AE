@@ -1522,37 +1522,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.parallel_config.pipeline_parallel_size):
                 for batch_size in reversed(batch_size_capture_list):
                     kv_cache = kv_caches[virtual_engine]
-                    if self.use_per_layer_attn_metadata:
-                        if self.scheduler_config.use_per_layer_block_manager:
-                            raise NotImplementedError  # convert group_id to block_id # TODO: * groupsize
-                            attn_metadata = {
-                                layer_id: self.attn_state.
-                                graph_capture_get_metadata_for_batch(
-                                    batch_size,
-                                    is_encoder_decoder_model=self.model_config.
-                                    is_encoder_decoder_model,
-                                    layer_id=layer_id)
-                                for layer_id in
-                                self.app_attn_metadata_builders.keys()
-                            }
-                            assert len(kv_cache) == 1
-                            kv_cache = [
-                                kv_cache[0] for _layer_id in range(
-                                    self.model_config.get_num_layers(
-                                        self.parallel_config))
-                            ]
-                        else:
-                            unified_attn_metadata = self.attn_state.graph_capture_get_metadata_for_batch(
+                    if self.scheduler_config.use_per_layer_block_manager:
+                        attn_metadata = {
+                            group_id: self.attn_state.
+                            graph_capture_get_metadata_for_batch(
                                 batch_size,
                                 is_encoder_decoder_model=self.model_config.
-                                is_encoder_decoder_model)
-                            attn_metadata = {
-                                str(layer_id): unified_attn_metadata
-                                for layer_id in range(
-                                    self.model_config.get_num_layers(
-                                        self.parallel_config))
-                            }
-
+                                is_encoder_decoder_model,
+                                group_id=group_id)
+                            for group_id in
+                            self.app_attn_metadata_builders.keys()
+                        }
+                        block_table_sharing = self.kv_cache_config.block_table_sharing
                     else:
                         attn_metadata = (
                             self.attn_state.
@@ -1560,6 +1541,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                 batch_size,
                                 is_encoder_decoder_model=self.model_config.
                                 is_encoder_decoder_model))
+                        if self.use_per_layer_attn_metadata:
+                            attn_metadata = {'whole_model': attn_metadata}
+                            block_table_sharing = {
+                                'whole_model': [
+                                    str(i) for i in range(
+                                        self.model_config.get_num_layers(
+                                            self.parallel_config))
+                                ]
+                            }
+                        else:
+                            block_table_sharing = {}
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1578,7 +1570,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
-                        self.model_config.is_encoder_decoder_model)
+                        self.model_config.is_encoder_decoder_model,
+                        block_table_sharing)
                     capture_inputs = {
                         "input_ids":
                         input_tokens[:batch_size],
@@ -1620,8 +1613,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    with set_forward_context(attn_metadata):
-                        graph_runner.capture(**capture_inputs)
+                    graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
@@ -1870,7 +1862,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 class CUDAGraphRunner:
 
     def __init__(self, model: nn.Module, backend_name: str,
-                 attn_state: AttentionState, is_encoder_decoder_model: bool):
+                 attn_state: AttentionState, is_encoder_decoder_model: bool,
+                 block_table_sharing: Dict[str, List[str]]):
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1880,6 +1873,7 @@ class CUDAGraphRunner:
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
         self._is_encoder_decoder_model = is_encoder_decoder_model
+        self.block_table_sharing = block_table_sharing
 
     @property
     def graph(self):
@@ -1904,26 +1898,37 @@ class CUDAGraphRunner:
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         # Note one iteration is not enough for torch.jit.script
-        for _ in range(_NUM_WARMUP_ITERS):
-            self.model(
-                input_ids=input_ids,
-                positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
-                intermediate_tensors=intermediate_inputs,
-                **kwargs,
-            )
+        if len(self.block_table_sharing) > 0:
+            attn_metadata_for_exec = {
+                layer_id: attn_metadata[group_id]
+                for group_id, layer_ids in self.block_table_sharing.items()
+                for layer_id in layer_ids
+            }
+        else:
+            attn_metadata_for_exec = attn_metadata
+        with set_forward_context(attn_metadata_for_exec):
+            for _ in range(_NUM_WARMUP_ITERS):
+                self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=attn_metadata_for_exec,
+                    intermediate_tensors=intermediate_inputs,
+                    **kwargs,
+                )
         # Wait for the warm up operations to finish before proceeding with
         # Graph Capture.
         torch.cuda.synchronize()
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
+        with torch.cuda.graph(
+                self._graph, pool=memory_pool,
+                stream=stream), set_forward_context(attn_metadata_for_exec):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
+                attn_metadata=attn_metadata_for_exec,
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )

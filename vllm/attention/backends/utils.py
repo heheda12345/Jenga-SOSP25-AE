@@ -317,12 +317,12 @@ class CommonAttentionState(AttentionState):
     @contextmanager
     def graph_capture(self,
                       max_batch_size: int,
-                      attn_metadata_keys: Optional[list[Any]] = None):
+                      attn_metadata_keys: Optional[list[str]] = None):
         self._is_graph_capturing = True
         self._pre_alloc_tensors = {}
         # TODO: for models without kv cache, we do not need to allocate the following tensors
         if len(attn_metadata_keys) == 0:
-            attn_metadata_keys = [0]
+            attn_metadata_keys = ['whole_model']
         for key in attn_metadata_keys:
             self._pre_alloc_tensors[key] = {
                 'slot_mapping':
@@ -350,10 +350,10 @@ class CommonAttentionState(AttentionState):
             self,
             batch_size: int,
             is_encoder_decoder_model: bool = False,
-            group_id: Optional[int] = None) -> Dict[str, Any]:
+            group_id: Optional[str] = None) -> Dict[str, Any]:
         assert self._is_graph_capturing
         if group_id is None:
-            group_id = 0
+            group_id = 'whole_model'
         pre_alloc_tensors = self._pre_alloc_tensors[group_id]
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -426,13 +426,34 @@ class CommonAttentionState(AttentionState):
         if isinstance(attn_metadata, dict):
             per_layer_attn_meta_buffer = input_buffers[
                 "per_layer_attn_metadata"]
-            for group_id, attn in attn_metadata.items():
-                per_layer_attn_meta_buffer[group_id]["slot_mapping"].copy_(
-                    attn.slot_mapping, non_blocking=True)
-                per_layer_attn_meta_buffer[group_id]["seq_lens_tensor"].copy_(
-                    attn.decode_metadata.seq_lens_tensor, non_blocking=True)
-                per_layer_attn_meta_buffer[group_id]["block_tables"].copy_(
-                    attn.decode_metadata.block_tables, non_blocking=True)
+            kv_cache_config = self.runner.kv_cache_config
+
+            if kv_cache_config is None:
+                attn = next(iter(attn_metadata.values()))
+                per_layer_attn_meta_buffer["whole_model"][
+                    "slot_mapping"].copy_(attn.slot_mapping, non_blocking=True)
+                per_layer_attn_meta_buffer["whole_model"][
+                    "seq_lens_tensor"].copy_(
+                        attn.decode_metadata.seq_lens_tensor,
+                        non_blocking=True)
+                per_layer_attn_meta_buffer["whole_model"][
+                    "block_tables"].copy_(attn.decode_metadata.block_tables,
+                                          non_blocking=True)
+            else:
+                block_table_sharing = self.runner.kv_cache_config.block_table_sharing
+                for group_id in block_table_sharing.keys():
+                    # layers in the same group uses the same buffer
+                    # only copy the buffer once
+                    layer_id = block_table_sharing[group_id][0]
+                    attn = attn_metadata[layer_id]
+                    per_layer_attn_meta_buffer[group_id]["slot_mapping"].copy_(
+                        attn.slot_mapping, non_blocking=True)
+                    per_layer_attn_meta_buffer[group_id][
+                        "seq_lens_tensor"].copy_(
+                            attn.decode_metadata.seq_lens_tensor,
+                            non_blocking=True)
+                    per_layer_attn_meta_buffer[group_id]["block_tables"].copy_(
+                        attn.decode_metadata.block_tables, non_blocking=True)
             if is_encoder_decoder_model:
                 raise NotImplementedError
         else:
