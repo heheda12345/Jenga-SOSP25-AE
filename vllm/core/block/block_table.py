@@ -44,12 +44,13 @@ class BlockTable:
         block_allocator: DeviceAwareBlockAllocator,
         _blocks: Optional[List[Block]] = None,
         max_block_sliding_window: Optional[int] = None,
+        block_id_multiplier: int = 1,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
         if _blocks is None:
             _blocks = []
-        self._blocks: BlockList = BlockList(_blocks)
+        self._blocks: BlockList = BlockList(_blocks, block_id_multiplier)
 
         self._max_block_sliding_window = max_block_sliding_window
         self._num_full_slots = self._get_num_token_ids()
@@ -240,6 +241,10 @@ class BlockTable:
         """
         return self._blocks.ids()
 
+    @property
+    def physical_block_ids_for_exec(self) -> List[int]:
+        return self._blocks.ids_for_exec()
+
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
         """Get the number of "unseen" tokens in the sequence.
 
@@ -372,3 +377,6 @@ class BlockTable:
         token_blocks.extend(
             chunk_list(token_ids[first_chunk_size:], self._block_size))
         return token_blocks
+
+    def set_block_id_multiplier(self, block_id_multiplier: int):
+        self._blocks.set_block_id_multiplier(block_id_multiplier)

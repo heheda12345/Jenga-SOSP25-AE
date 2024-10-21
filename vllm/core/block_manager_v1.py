@@ -661,7 +661,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self._free_block_table(block_table)
         self.cross_block_tables.clear()
 
-    def get_block_table(self, seq: Sequence) -> List[int]:
+    def get_block_table_for_exec(self, seq: Sequence) -> List[int]:
         return self.block_tables[seq.seq_id].ids()
 
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:

@@ -149,16 +149,12 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
             block.free()
         del self.block_tables[seq_id]
 
-    def get_block_table(self, seq: Sequence) -> PER_LAYER_BLOCK_IDS:
+    def get_block_table_for_exec(self, seq: Sequence) -> PER_LAYER_BLOCK_IDS:
         block_tables = self.block_tables[seq.seq_id]
         block_ids = {
-            block_id: block_tables[block_id].physical_block_ids
+            block_id: block_tables[block_id].physical_block_ids_for_exec
             for block_id in block_tables
         }
-        # print("[[[block_ids: ]]]")
-        # for layer_id in block_ids:
-        #     print(f"layer: {layer_id}, block_ids: {block_ids[layer_id]}")
-        #     if layer_id == 3: break
         return block_ids
 
     def get_num_free_gpu_blocks(self) -> int:

@@ -194,10 +194,11 @@ class CustomBlockManager:
             allocator: DeviceAwareBlockAllocator) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
         for group_id in self.kv_cache_config.block_table_sharing.keys():
-            manager = self._app_aware_managers[
-                self.kv_cache_config.block_table_sharing[group_id][0]]
+            layer_ids = self.kv_cache_config.block_table_sharing[group_id]
+            manager = self._app_aware_managers[layer_ids[0]]
             block = manager.allocate_sequence(seq_group, allocator)
             if block is not None:
+                block.set_block_id_multiplier(len(layer_ids))
                 block_table[group_id] = block
         return block_table
 

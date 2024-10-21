@@ -62,7 +62,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         # No operation on free
         return
 
-    def get_block_table(self, seq: Sequence) -> List[int]:
+    def get_block_table_for_exec(self, seq: Sequence) -> List[int]:
         return None  # type: ignore
 
     def get_num_free_gpu_blocks(self) -> int:

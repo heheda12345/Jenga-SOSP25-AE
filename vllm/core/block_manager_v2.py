@@ -273,7 +273,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.cross_block_tables[request_id].free()
         del self.cross_block_tables[request_id]
 
-    def get_block_table(self, seq: Sequence) -> List[int]:
+    def get_block_table_for_exec(self, seq: Sequence) -> List[int]:
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         return block_ids  # type: ignore
 

@@ -100,7 +100,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_block_table(self, seq: Sequence) -> BLOCK_IDS:
+    def get_block_table_for_exec(self, seq: Sequence) -> BLOCK_IDS:
         pass
 
     @abstractmethod

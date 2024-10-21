@@ -225,20 +225,25 @@ class BlockList:
     list on every iteration of the block manager
     """
 
-    def __init__(self, blocks: List[Block]):
+    def __init__(self, blocks: List[Block], block_id_multiplier: int):
         self._blocks: List[Block] = []
         self._block_ids: List[int] = []
+        self._block_ids_for_exec: List[int] = []
+        self.block_id_multiplier = block_id_multiplier
 
         self.update(blocks)
 
     def _add_block_id(self, block_id: Optional[BlockId]) -> None:
         assert block_id is not None
         self._block_ids.append(block_id)
+        self._block_ids_for_exec.append(block_id * self.block_id_multiplier)
 
     def _update_block_id(self, block_index: int,
                          new_block_id: Optional[BlockId]) -> None:
         assert new_block_id is not None
         self._block_ids[block_index] = new_block_id
+        self._block_ids_for_exec[
+            block_index] = new_block_id * self.block_id_multiplier
 
     def update(self, blocks: List[Block]):
         self._blocks = blocks
@@ -281,6 +286,15 @@ class BlockList:
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+    def ids_for_exec(self) -> List[int]:
+        return self._block_ids_for_exec
+
+    def set_block_id_multiplier(self, block_id_multiplier: int):
+        self.block_id_multiplier = block_id_multiplier
+        self._block_ids_for_exec = [
+            block_id * self.block_id_multiplier for block_id in self._block_ids
+        ]
 
 
 @dataclass

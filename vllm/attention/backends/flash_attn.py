@@ -382,6 +382,7 @@ class FlashAttentionMetadataBuilder(
                             self.group_id][-curr_sliding_window_block:]
                     else:
                         block_table = block_tables[seq_id][self.group_id]
+                block_table = [2 * x for x in block_table]
                 self.block_tables.append(block_table)
             else:
                 if prefix_cache_hit:
@@ -404,15 +405,17 @@ class FlashAttentionMetadataBuilder(
                 self.use_v2_block_manager)
 
             if is_profile_run:
-                block_table = None
+                block_table_for_slot = None
             elif self.use_per_layer_block_manager:
-                block_table = inter_data.block_tables[seq_id][self.group_id]
+                block_table_for_slot = inter_data.block_tables[seq_id][
+                    self.group_id]
+                block_table_for_slot = [2 * x for x in block_table_for_slot]
             else:
-                block_table = inter_data.block_tables[seq_id]
+                block_table_for_slot = inter_data.block_tables[seq_id]
 
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, block_table)
+                                 self.block_size, block_table_for_slot)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -630,8 +633,16 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() == 0:
-            kv_cache = (kv_cache, kv_cache)
+        if isinstance(kv_cache, torch.Tensor):
+            if kv_cache.numel() == 0:
+                key_cache, value_cache = kv_cache, kv_cache
+            else:
+                key_cache, value_cache = kv_cache[0], kv_cache[1]
+        elif isinstance(kv_cache, (list, tuple)):
+            key_cache, value_cache = kv_cache
+        else:
+            raise ValueError("kv_cache of type {} is not supported.".format(
+                type(kv_cache)))
 
         output = torch.ops.vllm.unified_flash_attention(
             query,
@@ -640,8 +651,8 @@ class FlashAttentionImpl(AttentionImpl):
             self.num_heads,
             self.head_size,
             self.num_kv_heads,
-            kv_cache[0],
-            kv_cache[1],
+            key_cache,
+            value_cache,
             self.kv_cache_dtype,
             k_scale,
             v_scale,
