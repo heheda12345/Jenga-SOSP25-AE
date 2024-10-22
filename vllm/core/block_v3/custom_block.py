@@ -232,10 +232,11 @@ class SlidingWindowManager(AppAwareManager):
                                 num_lookahead_slots: int = 0) -> int:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_tokens = len(seq.get_token_ids())
-        num_required_blocks = cdiv(num_tokens,
-                                   self.block_size) + num_lookahead_slots
-        num_required_blocks = min(num_required_blocks,
-                                  self.max_block_sliding_window)
+        num_required_blocks = cdiv(num_tokens + num_lookahead_slots,
+                                   self.block_size)  # ????
+        # Do not calculate min here, as prefill phase allocates all blocks
+        # num_required_blocks = min(num_required_blocks,
+        #                           self.max_block_sliding_window)
         return num_required_blocks
 
     def allocate_sequence(

@@ -234,13 +234,12 @@ class Worker(LocalOrDistributedWorkerBase):
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        print("peak_memory", peak_memory / 1024 / 1024 / 1024)
-        print("total_gpu_memory", total_gpu_memory / 1024 / 1024 / 1024)
-        print("self.cache_config.gpu_memory_utilization",
-              self.cache_config.gpu_memory_utilization)
-
         available_gpu_memory = total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory
         available_cpu_memory = self.cache_config.swap_space_bytes
+
+        logger.info("Available GPU memory: %d GB, Total GPU memory: %d GB",
+                    available_gpu_memory / 1024 / 1024 / 1024,
+                    total_gpu_memory / 1024 / 1024 / 1024)
 
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
@@ -318,6 +317,11 @@ class Worker(LocalOrDistributedWorkerBase):
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
+        logger.info(
+            "Available GPU memory: %d GB, Total GPU memory: %d GB, num_blocks %d",
+            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory) / 1024 / 1024 / 1024,
+            total_gpu_memory / 1024 / 1024 / 1024, num_gpu_blocks)
         gc.collect()
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
@@ -563,11 +567,11 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
-    max_seq_len = block_size * num_gpu_blocks
-    if max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+    # max_seq_len = block_size * num_gpu_blocks
+    # if max_model_len > max_seq_len:
+    #     raise ValueError(
+    #         f"The model's max seq len ({max_model_len}) "
+    #         "is larger than the maximum number of tokens that can be "
+    #         f"stored in KV cache ({max_seq_len}). Try increasing "
+    #         "`gpu_memory_utilization` or decreasing `max_model_len` when "
+    #         "initializing the engine.")
