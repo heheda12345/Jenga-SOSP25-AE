@@ -87,6 +87,7 @@ def run_vllm(
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
     use_v2_block_manager: bool = False,
+    use_per_layer_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
@@ -114,6 +115,7 @@ def run_vllm(
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
+        use_per_layer_block_manager=use_per_layer_block_manager,
         disable_async_output_proc=disable_async_output_proc,
     )
 
@@ -177,6 +179,7 @@ async def run_vllm_async(
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
     use_v2_block_manager: bool = False,
+    use_per_layer_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
@@ -205,6 +208,7 @@ async def run_vllm_async(
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
+        use_per_layer_block_manager=use_per_layer_block_manager,
         disable_async_output_proc=disable_async_output_proc,
         worker_use_ray=False,
         disable_log_requests=True,
@@ -324,7 +328,16 @@ def main(args: argparse.Namespace):
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
-        prompt = "hi" * (args.input_len - 1)
+        # As tokenizer may add additional tokens like BOS, we need to try
+        # different lengths to get the desired input length.
+        for i in range(-10, 10):
+            prompt = "hi " * (args.input_len + i)
+            tokenized_prompt = tokenizer(prompt).input_ids
+            if len(tokenized_prompt) == args.input_len:
+                break
+        else:
+            raise ValueError(
+                f"Failed to synthesize a prompt with {args.input_len} tokens.")
         requests = [(prompt, args.input_len, args.output_len)
                     for _ in range(args.num_prompts)]
     else:
@@ -341,8 +354,8 @@ def main(args: argparse.Namespace):
             args.enable_prefix_caching, args.enable_chunked_prefill,
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
-            args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc
+            args.use_v2_block_manager, args.use_per_layer_block_manager,
+            args.download_dir, args.load_format, args.disable_async_output_proc
         ]
 
         if args.async_engine:
@@ -474,6 +487,9 @@ if __name__ == "__main__":
     parser.add_argument("--use-v2-block-manager",
                         action='store_true',
                         help="Enable block manager v2.")
+    parser.add_argument("--use-per-layer-block-manager",
+                        action='store_true',
+                        help="Enable per layer block manager.")
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
