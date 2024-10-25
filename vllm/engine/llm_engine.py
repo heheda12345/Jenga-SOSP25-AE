@@ -1565,13 +1565,19 @@ class LLMEngine:
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
                      model_output: Optional[List[SamplerOutput]] = None,
                      finished_before: Optional[List[int]] = None,
-                     skip: Optional[List[int]] = None) -> None:
+                     skip: Optional[List[int]] = None,
+                     keys: Optional[Set[str]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
                                     finished_before, skip)
-            for logger in self.stat_loggers.values():
-                logger.log(stats)
+            if keys:
+                # a hack: when keys is provided, we use the system log to bypass
+                # interval
+                filtered_stats = {key: getattr(stats, key) for key in keys}
+                logger.info(f"Logging stats: {filtered_stats}")
+            for stat_logger in self.stat_loggers.values():
+                stat_logger.log(stats)
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],

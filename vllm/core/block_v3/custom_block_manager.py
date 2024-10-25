@@ -7,6 +7,8 @@ from vllm.core.block.interfaces import (
     Block,
     DeviceAwareBlockAllocator,
 )
+from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
+from vllm.core.interfaces import ComputedBlock
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
@@ -120,7 +122,10 @@ class CustomBlockManager:
             page_size = list(group_result.keys())[0]
             groups = group_result[page_size]  # {app_property -> [layer_id]}
             group_sizes = [len(layers) for layers in groups.values()]
-            group_size_gcd = math.gcd(*group_sizes)
+            if self.cache_config.enable_layer_grouping:
+                group_size_gcd = math.gcd(*group_sizes)
+            else:
+                group_size_gcd = 1
             allocator_page_size = page_size * group_size_gcd
             num_pages = get_num_pages(available_num_elements,
                                       allocator_page_size)
@@ -196,7 +201,7 @@ class CustomBlockManager:
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             layer_ids = self.kv_cache_config.block_table_sharing[group_id]
             manager = self._app_aware_managers[layer_ids[0]]
-            block = manager.allocate_sequence(seq_group, allocator)
+            block = manager.allocate_sequence(seq_group, allocator, group_id)
             if block is not None:
                 block.set_block_id_multiplier(len(layer_ids))
                 block_table[group_id] = block
@@ -225,3 +230,38 @@ class CustomBlockManager:
             assert group_id in block_table
             manager.append_token_ids(seq, block_table[group_id],
                                      num_lookahead_slots)
+
+    @require_kv_config_init
+    def get_common_computed_block_ids(
+            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
+            computed_blocks_tracker: ComputedBlocksTracker) -> ComputedBlock:
+
+        computed_tokens = 2**62  # a large number
+        computed_blocks: Dict[str, List[int]] = {}
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            computed_block, computed_token = manager.get_computed_blocks_and_tokens(
+                seq, block_table[group_id], computed_blocks_tracker)
+            computed_tokens = min(computed_tokens, computed_token)
+            computed_blocks[group_id] = computed_block
+
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            computed_blocks[
+                group_id] = manager.filter_computed_blocks_by_token(
+                    computed_tokens, computed_blocks[group_id])
+
+        return ComputedBlock(computed_blocks, computed_tokens)
+
+    @require_kv_config_init
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            assert group_id in block_table
+            manager.update_seq_blocks_last_access(seq, block_table[group_id],
+                                                  last_access_blocks_tracker)

@@ -894,6 +894,8 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+        if self.llm_engine.cache_config.enable_prefix_caching:
+            self.llm_engine.do_log_stats(keys={'gpu_prefix_cache_hit_rate'})
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

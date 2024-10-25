@@ -63,7 +63,8 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Optional[Device] = None) -> Block:
+                                 device: Optional[Device] = None,
+                                 group_id_hash: int = 0) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
 
@@ -77,16 +78,18 @@ class NaiveBlockAllocator(BlockAllocator):
             Block: The newly allocated immutable block.
         """
         assert device is None
-        block = self.allocate_mutable_block(prev_block=prev_block)
+        block = self.allocate_mutable_block(prev_block=prev_block,
+                                            group_id_hash=group_id_hash)
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  device: Optional[Device] = None,
+                                  group_id_hash: int = 0) -> List[Block]:
         assert device is None
+        # we can ignore _group_id_hash in naive block allocator
         num_blocks = len(block_token_ids)
 
         block_ids = []
@@ -99,14 +102,16 @@ class NaiveBlockAllocator(BlockAllocator):
                 prev_block=prev_block,
                 token_ids=block_token_ids[i],
                 block_size=self._block_size,
-                physical_block_id=block_ids[i])
+                physical_block_id=block_ids[i],
+                group_id_hash=group_id_hash)
             blocks.append(prev_block)
 
         return blocks
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None) -> Block:
+                               device: Optional[Device] = None,
+                               group_id_hash: int = 0) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -118,11 +123,13 @@ class NaiveBlockAllocator(BlockAllocator):
             Block: The newly allocated mutable block.
         """
         assert device is None
+        # we can ignore _group_id_hash in naive block allocator
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
                                             block_size=self._block_size,
-                                            physical_block_id=block_id)
+                                            physical_block_id=block_id,
+                                            group_id_hash=group_id_hash)
         return block
 
     def _allocate_block_id(self) -> BlockId:
@@ -162,6 +169,7 @@ class NaiveBlockAllocator(BlockAllocator):
             List[Block]: The new sequence of blocks that shares the same memory
                 as the original sequence.
         """
+        raise NotImplementedError("we need to fix the todo below")
         source_blocks = get_all_blocks_recursively(last_block)
 
         forked_blocks: List[Block] = []
@@ -178,6 +186,7 @@ class NaiveBlockAllocator(BlockAllocator):
                 token_ids=block.token_ids,
                 block_size=self._block_size,
                 physical_block_id=block.block_id)
+            # TODO: group_id_hash=group_id_hash
 
             forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]

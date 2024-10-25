@@ -111,6 +111,7 @@ class EngineArgs:
     use_per_layer_block_manager: bool = False  # TODO: use cleaner flag after v1 is deprecated
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
+    layer_grouping: bool = True
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -391,6 +392,11 @@ class EngineArgs:
             help=
             'Use PerlayerBlockSpaceManager. By default this is set to False. '
             'Set to True to use PerlayerBlockSpaceManager')
+        parser.add_argument(
+            '--layer-grouping',
+            type=bool,
+            default=True,
+        )
         parser.add_argument(
             '--num-lookahead-slots',
             type=int,
@@ -927,7 +933,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
-        )
+            enable_layer_grouping=self.layer_grouping)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,

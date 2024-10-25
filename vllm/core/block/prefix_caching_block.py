@@ -121,6 +121,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
         computed: bool = False,
+        group_id_hash: int = 0,
     ) -> Block:
         # Bind block to self.
         allocator = self
@@ -132,12 +133,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_id=block_id,
             allocator=allocator,
             computed=computed,
+            group_id_hash=group_id_hash,
         )
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Optional[Device] = None) -> Block:
+                                 device: Optional[Device] = None,
+                                 group_id_hash: int = 0) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
 
@@ -155,7 +158,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=token_ids,
                                             block_size=self._block_size,
-                                            physical_block_id=None)
+                                            physical_block_id=None,
+                                            group_id_hash=group_id_hash)
         assert block.content_hash is not None
 
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
@@ -168,26 +172,30 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
-        block = self.allocate_mutable_block(prev_block)
+        block = self.allocate_mutable_block(prev_block,
+                                            group_id_hash=group_id_hash)
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  device: Optional[Device] = None,
+                                  group_id_hash: int = 0) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
-            prev_block = self.allocate_immutable_block(prev_block=prev_block,
-                                                       token_ids=token_ids,
-                                                       device=device)
+            prev_block = self.allocate_immutable_block(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                device=device,
+                group_id_hash=group_id_hash)
             blocks.append(prev_block)
         return blocks
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None) -> Block:
+                               device: Optional[Device] = None,
+                               group_id_hash: int = 0) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
         evict unused cached blocks.
 
@@ -205,7 +213,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
                                             block_size=self._block_size,
-                                            physical_block_id=block_id)
+                                            physical_block_id=block_id,
+                                            group_id_hash=group_id_hash)
         assert not block.computed
         assert block.content_hash is None
         return block
@@ -663,6 +672,7 @@ class PrefixCachingBlock(Block):
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
         computed: bool = False,
+        group_id_hash: int = 0,
     ):
         assert isinstance(allocator, PrefixCachingBlockAllocator), (
             "Currently this class is only tested with "
@@ -676,6 +686,7 @@ class PrefixCachingBlock(Block):
         self._allocator = allocator
         self._last_accessed: float = _DEFAULT_LAST_ACCESSED_TIME
         self._computed = computed
+        self._group_id_hash = group_id_hash
 
         # On the first time, we create the block object, and next we only
         # reinitialize it
@@ -685,7 +696,8 @@ class PrefixCachingBlock(Block):
                 token_ids=token_ids,
                 block_size=block_size,
                 block_id=block_id,
-                allocator=self._allocator)
+                allocator=self._allocator,
+            )
         else:
             self._block = NaiveBlock(prev_block=prev_block,
                                      token_ids=token_ids,
@@ -815,12 +827,15 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
             is_first_block,
             prev_block_hash,
-            cur_block_token_ids=self.token_ids)
+            cur_block_token_ids=self.token_ids,
+            group_id_hash=self._group_id_hash,
+        )
         return self._cached_content_hash
 
     @staticmethod
     def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
-                          cur_block_token_ids: List[int]) -> int:
+                          cur_block_token_ids: List[int],
+                          group_id_hash: int) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
@@ -839,7 +854,9 @@ class PrefixCachingBlock(Block):
         - int: The computed hash value for the block.
         """
         assert (prev_block_hash is None) == is_first_block
-        return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
+        assert group_id_hash != 0  # only for per-layer allocator
+        return hash((is_first_block, prev_block_hash, group_id_hash,
+                     *cur_block_token_ids))
 
 
 class ComputedBlocksTracker:

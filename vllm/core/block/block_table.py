@@ -38,14 +38,13 @@ class BlockTable:
             blocks.
     """
 
-    def __init__(
-        self,
-        block_size: int,
-        block_allocator: DeviceAwareBlockAllocator,
-        _blocks: Optional[List[Block]] = None,
-        max_block_sliding_window: Optional[int] = None,
-        block_id_multiplier: int = 1,
-    ):
+    def __init__(self,
+                 block_size: int,
+                 block_allocator: DeviceAwareBlockAllocator,
+                 _blocks: Optional[List[Block]] = None,
+                 max_block_sliding_window: Optional[int] = None,
+                 block_id_multiplier: int = 1,
+                 group_id: str = "") -> None:
         self._block_size = block_size
         self._allocator = block_allocator
         if _blocks is None:
@@ -54,6 +53,9 @@ class BlockTable:
 
         self._max_block_sliding_window = max_block_sliding_window
         self._num_full_slots = self._get_num_token_ids()
+
+        self._group_id = group_id
+        self._group_id_hash = hash(group_id)  # TODO: remove hash recomputation
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int],
@@ -188,7 +190,9 @@ class BlockTable:
             assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable_block(
-                    prev_block=self._blocks[-1], device=device))
+                    prev_block=self._blocks[-1],
+                    device=device,
+                    group_id_hash=self._group_id_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -211,6 +215,8 @@ class BlockTable:
             block_allocator=self._allocator,
             _blocks=forked_blocks,
             max_block_sliding_window=self._max_block_sliding_window,
+            group_id=self._group_id,
+            group_id_hash=self._group_id_hash,
         )
 
     def free(self) -> None:
@@ -280,8 +286,10 @@ class BlockTable:
         if block_token_ids:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
-                    prev_block, block_token_ids=block_token_ids,
-                    device=device))
+                    prev_block,
+                    block_token_ids=block_token_ids,
+                    device=device,
+                    group_id_hash=self._group_id_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -289,7 +297,9 @@ class BlockTable:
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device)
+                prev_block=prev_block,
+                device=device,
+                group_id_hash=self._group_id_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)

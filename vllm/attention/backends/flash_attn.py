@@ -370,7 +370,7 @@ class FlashAttentionMetadataBuilder(
             block_table = []
             if self.use_per_layer_block_manager:
                 if prefix_cache_hit:
-                    raise NotImplementedError
+                    block_table = block_tables[seq_id][self.group_id]
                 elif ((chunked_prefill_enabled or not is_prompt)
                       and block_tables is not None):
                     block_table = block_tables[seq_id][self.group_id]

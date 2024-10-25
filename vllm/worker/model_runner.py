@@ -14,7 +14,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.core.interfaces import BLOCK_IDS
+from vllm.core.interfaces import BLOCK_IDS, ComputedBlock
 import vllm.envs as envs
 from vllm.attention import AttentionMetadataBuilder
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -454,8 +454,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata inputs.
         if self.scheduler_config.use_per_layer_block_manager:
             self.attn_metadata_builders = {
-                group_id:
-                self.attn_backend.make_metadata_builder(
+                group_id: self.attn_backend.make_metadata_builder(
                     weakref.proxy(self), group_id,
                     app_attn_metadata_builders[group_id])
                 for group_id in app_attn_metadata_builders
@@ -527,11 +526,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         """
         computed_block_nums = inter_data.computed_block_nums
 
-        # Note that prefix caching does not support sliding window.
-        prefix_cache_hit = (computed_block_nums is not None
-                            and len(computed_block_nums) > 0
-                            and self.sliding_window is None
-                            and inter_data.is_prompt)
+        if isinstance(computed_block_nums, ComputedBlock):
+            prefix_cache_hit = computed_block_nums.computed_tokens > 0
+        else:
+            prefix_cache_hit = computed_block_nums is not None \
+                               and len(computed_block_nums) > 0
+        prefix_cache_hit &= inter_data.is_prompt
         inter_data.prefix_cache_hit = prefix_cache_hit
 
         if not prefix_cache_hit:
@@ -541,7 +541,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # The cache hit prompt tokens in this sequence. Note that
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
-        prefix_cache_len = len(computed_block_nums) * self.block_size
+        if isinstance(computed_block_nums, ComputedBlock):
+            prefix_cache_len = computed_block_nums.computed_tokens
+        else:
+            prefix_cache_len = len(computed_block_nums) * self.block_size
         # The number of so far computed prompt tokens in this sequence.
         context_len = inter_data.context_lens[seq_idx]
         # The total number of prompt tokens in this sequence.
@@ -1348,18 +1351,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 kv_cache_config = self.kv_cache_config
                 assert kv_cache_config is not None
                 kv_caches = {
-                    layer_id:
-                    torch.tensor([],
-                                 dtype=kv_cache_config.buffer_dtype,
-                                 device=self.device)
+                    layer_id: torch.tensor([],
+                                           dtype=kv_cache_config.buffer_dtype,
+                                           device=self.device)
                     for layer_ids in
                     kv_cache_config.block_table_sharing.values()
                     for layer_id in layer_ids
                 }
             else:
                 kv_caches = {
-                    str(layer_id):
-                    torch.tensor([], dtype=torch.float32, device=self.device)
+                    str(layer_id): torch.tensor([],
+                                                dtype=torch.float32,
+                                                device=self.device)
                     for layer_id in range(num_layers)
                 }
         else:
@@ -1525,8 +1528,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     kv_cache = kv_caches[virtual_engine]
                     if self.scheduler_config.use_per_layer_block_manager:
                         attn_metadata = {
-                            group_id:
-                            self.attn_state.
+                            group_id: self.attn_state.
                             graph_capture_get_metadata_for_batch(
                                 batch_size,
                                 is_encoder_decoder_model=self.model_config.

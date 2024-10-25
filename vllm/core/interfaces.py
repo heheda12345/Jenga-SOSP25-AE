@@ -4,6 +4,8 @@ from typing import List
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, Dict
 
+import msgspec
+
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.utils import Device
 
@@ -24,6 +26,11 @@ class AllocStatus(enum.Enum):
 
 PER_LAYER_BLOCK_IDS = Dict[int, List[int]]
 BLOCK_IDS = Union[List[int], PER_LAYER_BLOCK_IDS]
+
+
+class ComputedBlock(msgspec.Struct, omit_defaults=True, array_like=True):
+    computed_blocks: Dict[str, List[int]]  # group_id -> block_ids
+    computed_tokens: int
 
 
 class BlockSpaceManager(ABC):

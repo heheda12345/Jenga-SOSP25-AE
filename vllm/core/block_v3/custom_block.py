@@ -1,12 +1,13 @@
 # Import methods in this file to configure per-layer block table
 from abc import abstractmethod
 import math
-from typing import Protocol, Dict, Any, Type, TYPE_CHECKING
+from typing import List, Protocol, Dict, Any, Type, TYPE_CHECKING
 import torch
 from typing_extensions import TypeVar
 from vllm.config import KVCacheConfig, ModelConfig, ParallelConfig
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
+from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, Device, cdiv, chunk_list, get_dtype_size
 from vllm.logger import init_logger
@@ -44,15 +45,26 @@ class AppAwareManager:
         pass
 
     @abstractmethod
-    def allocate_sequence(
-            self, seq_group: SequenceGroup,
-            block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str) -> BlockTable:
         pass
 
     @abstractmethod
-    def get_num_blocks_touched_by_append_slots(
+    def get_computed_blocks_and_tokens(
             self, seq: Sequence, block_table: BlockTable,
-            num_lookahead_slots: int) -> int:
+            computed_blocks_tracker: ComputedBlocksTracker) -> int:
+        pass
+
+    @abstractmethod
+    def filter_computed_blocks_by_token(self, computed_tokens: int,
+                                        computed_blocks: List[int]):
+        pass
+
+    @abstractmethod
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
         pass
 
 
@@ -103,13 +115,14 @@ class SelfAttentionManager(AppAwareManager):
         num_tokens = len(seq.get_token_ids())
         return cdiv(num_tokens, self.block_size) + num_lookahead_slots
 
-    def allocate_sequence(
-            self, seq_group: SequenceGroup,
-            block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str) -> BlockTable:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         block_table = BlockTable(block_size=self.block_size,
                                  block_allocator=block_allocator,
-                                 max_block_sliding_window=None)
+                                 max_block_sliding_window=None,
+                                 group_id=group_id)
         block_table.allocate(seq.get_token_ids())
 
         return block_table
@@ -148,6 +161,27 @@ class SelfAttentionManager(AppAwareManager):
 
         block_table._num_full_slots += len(unseen_token_ids)
 
+    def get_computed_blocks_and_tokens(
+            self, seq: Sequence, block_table: BlockTable,
+            computed_blocks_tracker: ComputedBlocksTracker) -> int:
+        computed_blocks = computed_blocks_tracker.\
+            get_cached_computed_blocks_and_update(
+            seq.seq_id, block_table.physical_block_ids)
+
+        return computed_blocks, len(computed_blocks) * self.block_size
+
+    def filter_computed_blocks_by_token(self, computed_tokens: int,
+                                        computed_blocks: List[int]):
+        assert computed_tokens % self.block_size == 0
+        num_blocks = computed_tokens // self.block_size
+        return computed_blocks[:num_blocks]
+
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        last_access_blocks_tracker.update_seq_blocks_last_access(
+            seq.seq_id, block_table.physical_block_ids)
+
 
 class EncoderDecoderManager(AppAwareManager):
 
@@ -177,15 +211,14 @@ class EncoderDecoderManager(AppAwareManager):
         else:
             return 0
 
-    def allocate_sequence(
-            self, seq_group: SequenceGroup,
-            block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str) -> BlockTable:
         encoder_seq = seq_group.get_encoder_seq()
-        block_table = BlockTable(
-            block_size=self.block_size,
-            block_allocator=block_allocator,
-            max_block_sliding_window=None,
-        )
+        block_table = BlockTable(block_size=self.block_size,
+                                 block_allocator=block_allocator,
+                                 max_block_sliding_window=None,
+                                 group_id=group_id)
         encoder_seq_token_ids = encoder_seq.get_token_ids()
         if encoder_seq_token_ids:
             block_table.allocate(encoder_seq_token_ids)
@@ -239,16 +272,17 @@ class SlidingWindowManager(AppAwareManager):
         #                           self.max_block_sliding_window)
         return num_required_blocks
 
-    def allocate_sequence(
-            self, seq_group: SequenceGroup,
-            block_allocator: DeviceAwareBlockAllocator) -> BlockTable:
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str) -> BlockTable:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         # TODO: handle sliding window in this manager, so that we can remove the
         # sliding window logic in other parts of the code
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=block_allocator,
-            max_block_sliding_window=self.max_block_sliding_window)
+            max_block_sliding_window=self.max_block_sliding_window,
+            group_id=group_id)
         block_table.allocate(seq.get_token_ids())
 
         return block_table

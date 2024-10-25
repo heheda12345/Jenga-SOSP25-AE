@@ -580,6 +580,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
+        enable_layer_grouping: bool = True,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -588,6 +589,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
+        self.enable_layer_grouping = enable_layer_grouping
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -623,10 +625,10 @@ class CacheConfig:
         if not self.enable_prefix_caching:
             return
 
-        if self.sliding_window is not None:
-            raise NotImplementedError(
-                "Prefix caching is not supported with sliding window. "
-                "Run with --disable-sliding-window to use prefix caching.")
+        # if self.sliding_window is not None:
+        #     raise NotImplementedError(
+        #         "Prefix caching is not supported with sliding window. "
+        #         "Run with --disable-sliding-window to use prefix caching.")
 
     def verify_with_parallel_config(
         self,
@@ -1491,8 +1493,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "

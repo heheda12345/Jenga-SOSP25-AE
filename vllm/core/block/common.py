@@ -197,7 +197,8 @@ class BlockPool:
                                    block_id=None))
 
     def init_block(self, prev_block: Optional[Block], token_ids: List[int],
-                   block_size: int, physical_block_id: Optional[int]) -> Block:
+                   block_size: int, physical_block_id: Optional[int],
+                   group_id_hash: int) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
@@ -210,7 +211,8 @@ class BlockPool:
             token_ids=token_ids,
             block_size=block_size,
             allocator=block._allocator,  # type: ignore[attr-defined] 
-            block_id=physical_block_id)
+            block_id=physical_block_id,
+            group_id_hash=group_id_hash)
         block.pool_id = pool_id  # type: ignore[attr-defined]
         return block
 

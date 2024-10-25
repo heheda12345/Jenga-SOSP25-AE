@@ -2,8 +2,11 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
+import msgspec
+
 from vllm.config import ModelConfig
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
 from vllm.core.block_v3.custom_block_manager import CustomBlockManager, CUSTOM_BLOCK_TABLE
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager, PER_LAYER_BLOCK_IDS
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -32,8 +35,6 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         self.num_total_cpu_blocks = 0
         if sliding_window is not None:
             logger.warning("sliding_window can be deprecated in the future.")
-        if enable_caching:
-            raise NotImplementedError("Prefix caching is not supported")
 
         self.global_block_allocator = CpuGpuBlockAllocator.create(
             allocator_type="prefix_caching" if enable_caching else "naive",
@@ -50,6 +51,11 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
                 self.custom_block_manager.kv_cache_config.level0_page_size), )
 
         self.block_tables: Dict[SeqId, CUSTOM_BLOCK_TABLE] = {}
+
+        self._computed_blocks_tracker = ComputedBlocksTracker(
+            self.global_block_allocator)
+        self._last_access_blocks_tracker = LastAccessBlocksTracker(
+            self.global_block_allocator)
 
     def add_model(self, model: ModelConfig):
         self.custom_block_manager.add_block_managers_of_model(model)
@@ -79,10 +85,19 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
 
         block_table: CUSTOM_BLOCK_TABLE = self.custom_block_manager \
             .allocate_sequence(seq_group, self.global_block_allocator)
-        self.block_tables[seq_group.seqs[0].seq_id] = block_table
+
+        seq_id = seq_group.seqs[0].seq_id
+        self.block_tables[seq_id] = block_table
+
+        self._computed_blocks_tracker.add_seq(seq_id)
+        self._last_access_blocks_tracker.add_seq(seq_id)
 
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
+
+            # Track seq
+            self._computed_blocks_tracker.add_seq(seq.seq_id)
+            self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -144,6 +159,15 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
             # Already freed or haven't been scheduled yet.
             return
 
+        # Update seq block ids with the latest access time
+        self.custom_block_manager.update_seq_blocks_last_access(
+            seq, self.block_tables[seq.seq_id],
+            self._last_access_blocks_tracker)
+
+        # Untrack seq
+        self._last_access_blocks_tracker.remove_seq(seq_id)
+        self._computed_blocks_tracker.remove_seq(seq_id)
+
         # Free table/blocks
         for block in self.block_tables[seq_id].values():
             block.free()
@@ -163,34 +187,27 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
     def get_num_free_cpu_blocks(self) -> int:
         return self.global_block_allocator.get_num_free_blocks(Device.CPU)
 
-    def access_all_blocks_in_seq(
-        self,
-        seq: Sequence,
-        access_time: float,
-    ) -> None:
+    def access_all_blocks_in_seq(self, seq: Sequence, now: float):
         if self.enable_caching:
-            import pdb
-            pdb.set_trace()
-            raise NotImplementedError(
-                "not implemented: PerlayerBlockSpaceManager.access_all_blocks_in_seq"
-            )
+            # Record the latest access time for the sequence. The actual update
+            # of the block ids is deferred to the sequence free(..) call, since
+            # only during freeing of block ids, the blocks are actually added to
+            # the evictor (which is when the most updated time is required)
+            # (This avoids expensive calls to mark_blocks_as_accessed(..))
+            self._last_access_blocks_tracker.update_last_access(
+                seq.seq_id, now)
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
-        import pdb
-        pdb.set_trace()
-        raise NotImplementedError(
-            "not implemented: PerlayerBlockSpaceManager.get_common_computed_block_ids"
-        )
+        assert len(seqs) == 1
+        return self.custom_block_manager.get_common_computed_block_ids(
+            seqs[0], self.block_tables[seqs[0].seq_id],
+            self._computed_blocks_tracker)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup,
                                 token_chunk_size: int):
-        if self.enable_caching:
-            import pdb
-            pdb.set_trace()
-            raise NotImplementedError(
-                "not implemented: PerlayerBlockSpaceManager.mark_blocks_as_computed"
-            )
+        # mark all touched blocks as computed
+        self.global_block_allocator.mark_blocks_as_computed([])
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""

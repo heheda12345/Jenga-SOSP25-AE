@@ -150,6 +150,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
+            group_id='1',
         )
         if seq.get_token_ids():
             # Add blocks to the block table only if the sequence is non empty.

@@ -104,13 +104,14 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int]) -> Block:
+                                 token_ids: List[int],
+                                 group_id_hash: int) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable_blocks(
-            self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]]) -> List[Block]:
+    def allocate_immutable_blocks(self, prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  group_id_hash: int) -> List[Block]:
         pass
 
     @abstractmethod
@@ -202,14 +203,15 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device) -> Block:
+                                 token_ids: List[int], device: Device,
+                                 group_id_hash: int) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
                                   block_token_ids: List[List[int]],
-                                  device: Device) -> List[Block]:
+                                  device: Device,
+                                  group_id_hash: int) -> List[Block]:
         pass
 
     @abstractmethod
