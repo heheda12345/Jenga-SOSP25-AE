@@ -41,13 +41,14 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
                                    context_len: int, sliding_window: int,
-                                   use_v2_block_manager: bool):
+                                   use_v2_block_manager: bool,
+                                   use_per_layer_block_manager: bool):
     """
     Compute the start index of slot mapping.
     """
     start_idx = 0
     if is_prompt and sliding_window is not None:
-        assert use_v2_block_manager or context_len == 0, (
+        assert use_v2_block_manager or use_per_layer_block_manager or context_len == 0, (
             "Prefix caching is currently not supported with "
             "sliding window attention in V1 block manager")
         # When prefill, we use it to not write slots to kv cache
@@ -211,7 +212,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(
                 is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+                self.use_v2_block_manager, self.use_per_layer_block_manager)
             if is_profile_run:
                 block_table = None
             elif self.use_per_layer_block_manager:

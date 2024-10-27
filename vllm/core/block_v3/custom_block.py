@@ -28,12 +28,12 @@ class AppAwareManager:
 
     @abstractmethod
     def get_page_size(self) -> int:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_app_property(self) -> str:
         # app with the same property can share the same block table
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_num_required_blocks(self,
@@ -42,30 +42,30 @@ class AppAwareManager:
         # FIXME(heheda12345): When implementing this interface,  we assume that
         # all sequences in the group share the same prompt. This is the same as
         # BlockSpaceManagerV2.
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def allocate_sequence(self, seq_group: SequenceGroup,
                           block_allocator: DeviceAwareBlockAllocator,
                           group_id: str) -> BlockTable:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_computed_blocks_and_tokens(
             self, seq: Sequence, block_table: BlockTable,
             computed_blocks_tracker: ComputedBlocksTracker) -> int:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def filter_computed_blocks_by_token(self, computed_tokens: int,
                                         computed_blocks: List[int]):
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def update_seq_blocks_last_access(
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
-        pass
+        raise NotImplementedError
 
 
 AppAwareAttnMetadataBuilder = AppAwareManager
@@ -332,3 +332,27 @@ class SlidingWindowManager(AppAwareManager):
                                                  token_block)
 
         block_table._num_full_slots += len(unseen_token_ids)
+
+    def get_computed_blocks_and_tokens(
+            self, seq: Sequence, block_table: BlockTable,
+            computed_blocks_tracker: ComputedBlocksTracker) -> int:
+        computed_blocks = computed_blocks_tracker.\
+            get_cached_computed_blocks_and_update(
+            seq.seq_id, block_table.physical_block_ids)
+        print("computed_blocks", computed_blocks, len(computed_blocks))
+
+        return computed_blocks, len(computed_blocks) * self.block_size
+
+    def filter_computed_blocks_by_token(self, computed_tokens: int,
+                                        computed_blocks: List[int]):
+        assert computed_tokens % self.block_size == 0
+        num_blocks = computed_tokens // self.block_size
+        print("filtered", computed_blocks[:num_blocks],
+              len(computed_blocks[:num_blocks]))
+        return computed_blocks[:num_blocks]
+
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        last_access_blocks_tracker.update_seq_blocks_last_access(
+            seq.seq_id, block_table.physical_block_ids)

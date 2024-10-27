@@ -367,7 +367,8 @@ class NaiveBlock(Block):
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
-                 _cow_target: Optional[Block] = None):
+                 _cow_target: Optional[Block] = None,
+                 group_id_hash: int = 0):
         self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
