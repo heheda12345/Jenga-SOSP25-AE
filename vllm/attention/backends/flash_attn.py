@@ -783,8 +783,12 @@ def unified_flash_attention(
         decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
                                             num_head, head_dim)
         if window_size[0] != -1:
-            seq_lens_tensor = torch.clamp(decode_meta.seq_lens_tensor,
-                                          max=window_size[0])
+            block_size = key_cache.shape[1]
+            assert window_size[0] % block_size == 0
+            seq_lens_tensor = decode_meta.seq_lens_tensor
+            suff_len = seq_lens_tensor % block_size
+            seq_lens_tensor = torch.min(seq_lens_tensor,
+                                        window_size[0] + suff_len)
         else:
             seq_lens_tensor = decode_meta.seq_lens_tensor
         decode_output = flash_attn_with_kvcache(

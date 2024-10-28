@@ -389,7 +389,6 @@ class SlidingWindowManager(AppAwareManager):
         num_blocks = computed_tokens // self.block_size
 
         to_mutable_block(block_table, block_allocator, num_blocks)
-        # TODO: re-alloc mutable blocks
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(
