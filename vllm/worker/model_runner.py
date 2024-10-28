@@ -979,7 +979,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = model_config.get_sliding_window()
+        # self.sliding_window = model_config.get_sliding_window()
+        self.sliding_window = None # hack for gemma2
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
         self.max_batchsize_to_capture = _get_max_graph_batch_size(

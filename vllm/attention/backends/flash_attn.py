@@ -144,7 +144,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-    curr_sliding_window_block: List[int]
 
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
@@ -180,7 +179,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
-            curr_sliding_window_block=self.curr_sliding_window_block[:self.num_prefills],
         )
         return self._cached_prefill_metadata
 
@@ -212,7 +210,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
-            curr_sliding_window_block=self.curr_sliding_window_block[self.num_prefills:],
         )
         return self._cached_decode_metadata
 
@@ -310,7 +307,6 @@ class FlashAttentionMetadataBuilder(
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
             input_builder.scheduler_config.use_v2_block_manager)
-        self.curr_sliding_window_block: list[int] = []
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -350,13 +346,12 @@ class FlashAttentionMetadataBuilder(
                 block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
-                # if curr_sliding_window_block == 0:
-                block_table = block_tables[seq_id]
-                # else:
-                #     block_table = block_tables[seq_id][
-                #         -curr_sliding_window_block:]
+                if curr_sliding_window_block == 0:
+                    block_table = block_tables[seq_id]
+                else:
+                    block_table = block_tables[seq_id][
+                        -curr_sliding_window_block:]
             self.block_tables.append(block_table)
-            self.curr_sliding_window_block.append(curr_sliding_window_block)
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
@@ -480,7 +475,6 @@ class FlashAttentionMetadataBuilder(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            curr_sliding_window_block=self.curr_sliding_window_block,
         )
 
 
@@ -738,20 +732,12 @@ def unified_flash_attention(
                 block_table=decode_meta.block_tables,
             )
         else:
-            if window_size[0] != -1:
-                block_tables = decode_meta.block_tables.clone()
-                for i, curr_sliding_window_block in enumerate(
-                        decode_meta.curr_sliding_window_block):
-                    if curr_sliding_window_block > 0:
-                        block_tables[i][:curr_sliding_window_block] = decode_meta.block_tables[i][-curr_sliding_window_block:]
-            else:
-                block_tables = decode_meta.block_tables
             # Use flash_attn_with_kvcache for normal decoding.
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
                 v_cache=value_cache,
-                block_table=block_tables,
+                block_table=decode_meta.block_tables,
                 cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=softmax_scale,
                 causal=True,
