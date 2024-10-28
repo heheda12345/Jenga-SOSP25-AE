@@ -311,6 +311,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_computed_block_ids(
             prev_computed_block_ids, block_ids, skip_last_block_id)
 
+    def get_blocks_is_computed(self, block_ids: List[int]) -> List[bool]:
+        device = Device.GPU
+        return self._allocators[device].get_blocks_is_computed(block_ids)
+
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         # Prefix caching only supported on GPU.

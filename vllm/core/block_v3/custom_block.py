@@ -1,7 +1,7 @@
 # Import methods in this file to configure per-layer block table
 from abc import abstractmethod
 import math
-from typing import List, Protocol, Dict, Any, Type, TYPE_CHECKING
+from typing import List, Protocol, Dict, Any, Tuple, Type, TYPE_CHECKING
 import torch
 from typing_extensions import TypeVar
 from vllm.config import KVCacheConfig, ModelConfig, ParallelConfig
@@ -51,14 +51,17 @@ class AppAwareManager:
         raise NotImplementedError
 
     @abstractmethod
-    def get_computed_blocks_and_tokens(
-            self, seq: Sequence, block_table: BlockTable,
-            computed_blocks_tracker: ComputedBlocksTracker) -> int:
+    def get_possible_hit_lens(
+            self, block_is_computed: List[bool]) -> List[Tuple[int, int]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_prefix_cache_alignment(self) -> int:
         raise NotImplementedError
 
     @abstractmethod
     def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        computed_blocks: List[int]):
+                                        block_table: BlockTable):
         raise NotImplementedError
 
     @abstractmethod
@@ -161,20 +164,20 @@ class SelfAttentionManager(AppAwareManager):
 
         block_table._num_full_slots += len(unseen_token_ids)
 
-    def get_computed_blocks_and_tokens(
-            self, seq: Sequence, block_table: BlockTable,
-            computed_blocks_tracker: ComputedBlocksTracker) -> int:
-        computed_blocks = computed_blocks_tracker.\
-            get_cached_computed_blocks_and_update(
-            seq.seq_id, block_table.physical_block_ids)
+    def get_prefix_cache_alignment(self) -> int:
+        return self.block_size
 
-        return computed_blocks, len(computed_blocks) * self.block_size
+    def get_possible_hit_lens(
+            self, block_is_computed: List[bool]) -> List[Tuple[int, int]]:
+        assert block_is_computed[-1] is False
+        hit_until = block_is_computed.index(False)
+        return [(0, hit_until * self.block_size)]
 
     def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        computed_blocks: List[int]):
+                                        block_table: BlockTable):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
-        return computed_blocks[:num_blocks]
+        return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(
             self, seq: Sequence, block_table: BlockTable,
@@ -233,6 +236,9 @@ class EncoderDecoderManager(AppAwareManager):
         # Encoder-decoder KV cache size is not changed during decoding
         pass
 
+    def get_prefix_cache_alignment(self) -> int:
+        return self.block_size
+
 
 class SlidingWindowManager(AppAwareManager):
 
@@ -253,6 +259,7 @@ class SlidingWindowManager(AppAwareManager):
         # For example, if sliding_window is 3 and block_size is 4,
         # we may need 2 blocks when the second block only holds 1 token.
         self.max_block_sliding_window = num_blocks + 1
+        print("max_block_sliding_window", self.max_block_sliding_window)
 
     def get_page_size(self):
         return self.block_size * self.memory_per_token
@@ -333,23 +340,31 @@ class SlidingWindowManager(AppAwareManager):
 
         block_table._num_full_slots += len(unseen_token_ids)
 
-    def get_computed_blocks_and_tokens(
-            self, seq: Sequence, block_table: BlockTable,
-            computed_blocks_tracker: ComputedBlocksTracker) -> int:
-        computed_blocks = computed_blocks_tracker.\
-            get_cached_computed_blocks_and_update(
-            seq.seq_id, block_table.physical_block_ids)
-        print("computed_blocks", computed_blocks, len(computed_blocks))
+    def get_prefix_cache_alignment(self) -> int:
+        return self.block_size
 
-        return computed_blocks, len(computed_blocks) * self.block_size
+    def get_possible_hit_lens(
+            self, block_is_computed: List[bool]) -> List[Tuple[int, int]]:
+        assert block_is_computed[-1] is False
+        start = 0
+        ranges = []
+        for i, is_computed in enumerate(block_is_computed):
+            if not is_computed:
+                if start == 0:
+                    ranges.append(
+                        (start * self.block_size, i * self.block_size))
+                elif i - start >= self.max_block_sliding_window:
+                    ranges.append(((start + self.max_block_sliding_window) *
+                                   self.block_size, i * self.block_size))
+                start = i + 1
+        return ranges
 
     def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        computed_blocks: List[int]):
+                                        block_table: BlockTable):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
-        print("filtered", computed_blocks[:num_blocks],
-              len(computed_blocks[:num_blocks]))
-        return computed_blocks[:num_blocks]
+        # TODO: re-alloc mutable blocks
+        return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(
             self, seq: Sequence, block_table: BlockTable,

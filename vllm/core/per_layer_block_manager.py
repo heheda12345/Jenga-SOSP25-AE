@@ -8,7 +8,7 @@ from vllm.config import ModelConfig
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
 from vllm.core.block_v3.custom_block_manager import CustomBlockManager, CUSTOM_BLOCK_TABLE
-from vllm.core.interfaces import AllocStatus, BlockSpaceManager, PER_LAYER_BLOCK_IDS
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager, PER_LAYER_BLOCK_IDS, ComputedBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.logger import init_logger
@@ -197,8 +197,8 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
             self._last_access_blocks_tracker.update_last_access(
                 seq.seq_id, now)
 
-    def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
+    def get_common_computed_block_ids(self,
+                                      seqs: List[Sequence]) -> ComputedBlock:
         assert len(seqs) == 1
         return self.custom_block_manager.get_common_computed_block_ids(
             seqs[0], self.block_tables[seqs[0].seq_id],

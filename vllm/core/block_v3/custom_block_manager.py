@@ -1,5 +1,6 @@
+from dataclasses import dataclass
 import math
-from typing import List, Optional, Dict, NewType
+from typing import List, Optional, Dict, NewType, Tuple
 
 from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig
 from vllm.core.block.common import BlockList
@@ -15,6 +16,7 @@ from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.core.block_v3.custom_block import AppAwareManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
+from vllm.core.block_v3.range_utils import intersect_multiple_sets
 
 logger = init_logger(__name__)
 
@@ -72,6 +74,11 @@ class UniqueID:
         return f"{group_name}_{i}"
 
 
+@dataclass
+class KVCacheScheduleConfig:
+    prefix_cache_alignment: Dict[str, int]  # group_id -> alignment
+
+
 class CustomBlockManager:
 
     def __init__(self, parallel_config: ParallelConfig,
@@ -83,11 +90,12 @@ class CustomBlockManager:
         self._app_aware_managers: Dict[str, AppAwareManager] = {}
         # reading _kv_cache_config is not allowed before is_finalized=True
         self._kv_cache_config: Optional[KVCacheConfig] = None
+        self._kv_cache_schedule_config: Optional[KVCacheScheduleConfig] = None
 
     @require_kv_config_not_init
     def compile(self, available_cpu_memory: int,
                 available_gpu_memory: int) -> KVCacheConfig:
-        self._kv_cache_config = self._compile_get_kv_cache_config(
+        self._kv_cache_config, self._kv_cache_schedule_config = self._compile_get_kv_cache_config(
             available_gpu_memory)
         # This function is called twice. One with available_gpu_memory=0 to get
         # the config for profile run, and the other with available_gpu_memory>0
@@ -138,6 +146,8 @@ class CustomBlockManager:
                 level0_page_size=allocator_page_size,
                 components={},
                 block_table_sharing={})
+            kv_cache_schedule_config = KVCacheScheduleConfig(
+                prefix_cache_alignment={})
             num_pages -= 1  # to avoid overflow due to start_bias
 
             for app_property, layers in groups.items():
@@ -153,8 +163,12 @@ class CustomBlockManager:
                             num_elements=num_pages * allocator_page_size,
                             page_size=page_size,
                         )
+                    layer_id = kv_cache_config.block_table_sharing[group_id][0]
+                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
+                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
             print("kv_cache_config", kv_cache_config)
-            return kv_cache_config
+            print("kv_cache_schedule_config", kv_cache_schedule_config)
+            return kv_cache_config, kv_cache_schedule_config
 
         raise NotImplementedError("too complex")
         # # all page size have only one app_property, and the app_property is the same:
@@ -236,24 +250,59 @@ class CustomBlockManager:
             self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
             computed_blocks_tracker: ComputedBlocksTracker) -> ComputedBlock:
 
-        computed_tokens = 2**62  # a large number
-        computed_blocks: Dict[str, List[int]] = {}
+        cached_computed_block = computed_blocks_tracker.get_cached_computed_block(
+            seq.seq_id)
+        if cached_computed_block is not None:
+            return cached_computed_block
+
+        # group_id -> [(left, right)], both inclusive
+        possible_hit_lens: Dict[str, List[Tuple[int, int]]] = {}
+
         for group_id in self.kv_cache_config.block_table_sharing.keys():
+            block_is_computed =  computed_blocks_tracker.\
+                get_cached_block_is_computed(
+                seq.seq_id, group_id, block_table[group_id].physical_block_ids)
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
-            computed_block, computed_token = manager.get_computed_blocks_and_tokens(
-                seq, block_table[group_id], computed_blocks_tracker)
-            computed_tokens = min(computed_tokens, computed_token)
-            computed_blocks[group_id] = computed_block
+            assert group_id in block_table
+            possible_hit_lens[group_id] = manager.get_possible_hit_lens(
+                block_is_computed)
+        print("possible_hit_lens", possible_hit_lens)
+
+        intersect_hit_lens = intersect_multiple_sets(
+            possible_hit_lens.values())
+        print("intersect_hit_lens", intersect_hit_lens)
+
+        hit_len = -1
+        for left, right in intersect_hit_lens[::-1]:
+            for j in range(right, left - 1, -1):
+                valid = all(j % alignment == 0
+                            for alignment in self._kv_cache_schedule_config.
+                            prefix_cache_alignment.values())
+                if valid:
+                    hit_len = j
+                    break
+            if hit_len != -1:
+                break
+        print("hit_len", hit_len)
+
+        if hit_len == -1:
+            hit_len = 0
+
+        computed_tokens = 0
+        computed_blocks: Dict[str, List[int]] = {}
 
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
-                    computed_tokens, computed_blocks[group_id])
+                    computed_tokens, block_table[group_id])
 
-        return ComputedBlock(computed_blocks, computed_tokens)
+        computed_block = ComputedBlock(computed_blocks, computed_tokens)
+        computed_blocks_tracker.set_cached_compute_block(
+            seq.seq_id, computed_block)
+        return computed_block
 
     @require_kv_config_init
     def update_seq_blocks_last_access(

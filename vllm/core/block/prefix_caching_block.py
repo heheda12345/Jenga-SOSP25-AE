@@ -8,6 +8,7 @@ from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.core.interfaces import ComputedBlock
 
 PrefixHash = int
 
@@ -166,8 +167,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if cached_block_id is not None:
             self.metric_data.query(hit=True)
             block.block_id = cached_block_id
+            print("cache hit:", block.block_id)
             self._incr_refcount_cached_block(block)
             return block
+        print("cache miss")
         self.metric_data.query(hit=False)
         self._block_pool.free_block(block)
 
@@ -326,6 +329,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._track_block_id(block_id, computed=False)
 
         return block_id
+
+    def evict_block_id(self, block_id: int) -> None:
+        # Here we get an evicted block, which is only added
+        # into evictor if its ref counter is 0
+        # and since its content would be changed, we need
+        # to remove it from _cached_blocks's tracking list
+        block_id, content_hash_to_evict = self.evictor.evict_block_id(block_id)
+
+        # Sanity checks
+        assert content_hash_to_evict in self._cached_blocks
+        _block_id = self._cached_blocks[content_hash_to_evict]
+        assert self._refcounter.get(_block_id) == 0
+        assert _block_id == block_id
+
+        self._cached_blocks.pop(content_hash_to_evict)
 
     def _free_block_id(self, block: Block) -> None:
         """Decrements the refcount of the block. The block may be in two 
@@ -562,6 +580,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             if self.block_is_computed(block_id):
                 ret.append(block_id)
         return ret
+
+    def get_blocks_is_computed(
+            self,
+            block_ids: List[int],
+            force_last_uncomputed: bool = True) -> List[bool]:
+        is_computed = [
+            self.block_is_computed(block_id) for block_id in block_ids[:-1]
+        ]
+        if len(block_ids) > 0:
+            if force_last_uncomputed:
+                is_computed.append(False)
+            else:
+                is_computed.append(self.block_is_computed(block_ids[-1]))
+        return is_computed
 
     def get_common_computed_block_ids(
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
@@ -882,18 +914,25 @@ class ComputedBlocksTracker:
         self._allocator = allocator
         self._cached_computed_seq_blocks: Dict[int, Tuple[List[int],
                                                           bool]] = {}
+        # seq_id => group_id => is_computed
+        self._cached_is_computed: Dict[int, Dict[str, List[bool]]] = {}
+        self._cached_computed_block: Dict[int, Optional[ComputedBlock]] = {}
 
     def add_seq(self, seq_id: int) -> None:
         """Start tracking seq_id
         """
         assert seq_id not in self._cached_computed_seq_blocks
         self._cached_computed_seq_blocks[seq_id] = ([], False)
+        self._cached_is_computed[seq_id] = {}
+        self._cached_computed_block[seq_id] = None
 
     def remove_seq(self, seq_id: int) -> None:
         """Stop tracking seq_id
         """
         assert seq_id in self._cached_computed_seq_blocks
         del self._cached_computed_seq_blocks[seq_id]
+        del self._cached_is_computed[seq_id]
+        del self._cached_computed_block[seq_id]
 
     def get_cached_computed_blocks_and_update(
             self, seq_id: int, block_ids: List[int]) -> List[int]:
@@ -940,6 +979,26 @@ class ComputedBlocksTracker:
                                                     has_gap)
 
         return computed_block_ids
+
+    def get_cached_block_is_computed(self, seq_id: int, group_id: str,
+                                     block_ids: List[int]):
+        assert seq_id in self._cached_is_computed
+        if group_id in self._cached_is_computed[seq_id]:
+            return self._cached_is_computed[seq_id][group_id]
+
+        block_is_computed = self._allocator.get_blocks_is_computed(block_ids)
+        block_is_computed[-1] = False  # Skip last block id
+        self._cached_is_computed[seq_id][group_id] = block_is_computed
+        return block_is_computed
+
+    def get_cached_computed_block(self, seq_id: int):
+        assert seq_id in self._cached_computed_block
+        return self._cached_computed_block[seq_id]
+
+    def set_cached_compute_block(self, seq_id: int,
+                                 computed_block: ComputedBlock):
+        assert seq_id in self._cached_computed_block
+        self._cached_computed_block[seq_id] = computed_block
 
 
 class LastAccessBlocksTracker:
