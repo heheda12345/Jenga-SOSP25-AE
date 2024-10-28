@@ -567,7 +567,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         sequence data (only required by decoding) if sliding window is enabled.
         """
         curr_sliding_window_block = 0
-        # sliding_seq_len = inter_data.seq_lens[seq_idx]
+        sliding_seq_len = inter_data.seq_lens[seq_idx]
         if not inter_data.is_prompt and self.sliding_window is not None:
             # TODO(sang): This is a hack to make sliding window work with
             # paged attn. We can remove it if we make paged attn kernel
@@ -587,7 +587,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         inter_data.curr_sliding_window_blocks[
             seq_idx] = curr_sliding_window_block
-        # inter_data.seq_lens[seq_idx] = sliding_seq_len
+        inter_data.seq_lens[seq_idx] = sliding_seq_len
 
     def _compute_lora_input(self, inter_data: InterDataForSeqGroup,
                             seq_idx: int,
