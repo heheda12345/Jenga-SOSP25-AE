@@ -60,8 +60,9 @@ class AppAwareManager:
         raise NotImplementedError
 
     @abstractmethod
-    def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        block_table: BlockTable):
+    def filter_computed_blocks_by_token(
+            self, computed_tokens: int, block_table: BlockTable,
+            block_allocator: DeviceAwareBlockAllocator):
         raise NotImplementedError
 
     @abstractmethod
@@ -92,6 +93,26 @@ def get_dtype(cache_dtype: str, model_config: ModelConfig) -> torch.dtype:
     if cache_dtype == "auto":
         return model_config.dtype
     return STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+
+
+def to_mutable_block(block_table: BlockTable,
+                     block_allocator: DeviceAwareBlockAllocator,
+                     from_idx: int):
+    next_block = None
+    for idx, block in zip(
+            range(len(block_table._blocks) - 1, from_idx - 1, -1),
+            block_table._blocks[:from_idx - 1:-1]):
+        if block.computed:
+            device = Device.GPU
+            block_allocator.free(block)
+            new_block = block_allocator.allocate_mutable_block(
+                block._prev_block, device, block._group_id_hash)
+            if next_block is not None:
+                next_block._prev_block = new_block
+            next_block = new_block
+            block_table._blocks[idx] = new_block
+        else:
+            next_block = block
 
 
 class SelfAttentionManager(AppAwareManager):
@@ -173,10 +194,12 @@ class SelfAttentionManager(AppAwareManager):
         hit_until = block_is_computed.index(False)
         return [(0, hit_until * self.block_size)]
 
-    def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        block_table: BlockTable):
+    def filter_computed_blocks_by_token(
+            self, computed_tokens: int, block_table: BlockTable,
+            block_allocator: DeviceAwareBlockAllocator):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
+        to_mutable_block(block_table, block_allocator, num_blocks)
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(
@@ -359,10 +382,13 @@ class SlidingWindowManager(AppAwareManager):
                 start = i + 1
         return ranges
 
-    def filter_computed_blocks_by_token(self, computed_tokens: int,
-                                        block_table: BlockTable):
+    def filter_computed_blocks_by_token(
+            self, computed_tokens: int, block_table: BlockTable,
+            block_allocator: DeviceAwareBlockAllocator):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
+
+        to_mutable_block(block_table, block_allocator, num_blocks)
         # TODO: re-alloc mutable blocks
         return block_table.physical_block_ids[:num_blocks]
 

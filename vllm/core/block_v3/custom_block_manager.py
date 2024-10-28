@@ -248,7 +248,8 @@ class CustomBlockManager:
     @require_kv_config_init
     def get_common_computed_block_ids(
             self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-            computed_blocks_tracker: ComputedBlocksTracker) -> ComputedBlock:
+            computed_blocks_tracker: ComputedBlocksTracker,
+            block_allocator: DeviceAwareBlockAllocator) -> ComputedBlock:
 
         cached_computed_block = computed_blocks_tracker.get_cached_computed_block(
             seq.seq_id)
@@ -289,7 +290,6 @@ class CustomBlockManager:
         if hit_len == -1:
             hit_len = 0
 
-        computed_tokens = 0
         computed_blocks: Dict[str, List[int]] = {}
 
         for group_id in self.kv_cache_config.block_table_sharing.keys():
@@ -297,9 +297,9 @@ class CustomBlockManager:
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
-                    computed_tokens, block_table[group_id])
+                    hit_len, block_table[group_id], block_allocator)
 
-        computed_block = ComputedBlock(computed_blocks, computed_tokens)
+        computed_block = ComputedBlock(computed_blocks, hit_len)
         computed_blocks_tracker.set_cached_compute_block(
             seq.seq_id, computed_block)
         return computed_block

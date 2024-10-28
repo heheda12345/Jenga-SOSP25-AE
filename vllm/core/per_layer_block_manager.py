@@ -202,7 +202,7 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         assert len(seqs) == 1
         return self.custom_block_manager.get_common_computed_block_ids(
             seqs[0], self.block_tables[seqs[0].seq_id],
-            self._computed_blocks_tracker)
+            self._computed_blocks_tracker, self.global_block_allocator)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup,
                                 token_chunk_size: int):
