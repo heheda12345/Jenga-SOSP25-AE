@@ -44,7 +44,8 @@ class BlockTable:
                  _blocks: Optional[List[Block]] = None,
                  max_block_sliding_window: Optional[int] = None,
                  block_id_multiplier: int = 1,
-                 group_id: str = "") -> None:
+                 group_id: str = "",
+                 seq_id: int = -1) -> None:
         self._block_size = block_size
         self._allocator = block_allocator
         if _blocks is None:
@@ -56,6 +57,8 @@ class BlockTable:
 
         self._group_id = group_id
         self._group_id_hash = hash(group_id)  # TODO: remove hash recomputation
+        assert seq_id != -1
+        self._seq_id = seq_id
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int],
@@ -143,6 +146,13 @@ class BlockTable:
             assert num_computed_slots is not None
             end_block_idx = (num_computed_slots //
                              self._block_size) - self._max_block_sliding_window
+            if self._allocator.allocator_type == "prefix_caching":
+                self._allocator._allocators[
+                    Device.GPU].update_seq_blocks_last_access(
+                        self._seq_id, [
+                            b.block_id for b in self._blocks[:end_block_idx]
+                            if b is not null_block
+                        ])
             for idx in range(0, end_block_idx):
                 b = self._blocks[idx]
                 if b is not null_block:
@@ -210,6 +220,7 @@ class BlockTable:
         assert self._is_allocated
         assert len(self._blocks) > 0
         forked_blocks = self._allocator.fork(self._blocks[-1])
+        raise NotImplementedError("need to pass seq_id")
         return BlockTable(
             block_size=self._block_size,
             block_allocator=self._allocator,

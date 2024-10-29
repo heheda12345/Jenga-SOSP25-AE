@@ -236,14 +236,17 @@ class CustomBlockManager:
         return total_blocks
 
     @require_kv_config_init
-    def append_token_ids(self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-                         num_lookahead_slots: int) -> int:
+    def append_token_ids(
+            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
+            num_lookahead_slots: int,
+            last_access_blocks_tracker: LastAccessBlocksTracker) -> int:
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
             manager.append_token_ids(seq, block_table[group_id],
-                                     num_lookahead_slots)
+                                     num_lookahead_slots,
+                                     last_access_blocks_tracker)
 
     @require_kv_config_init
     def get_common_computed_block_ids(
@@ -268,11 +271,9 @@ class CustomBlockManager:
             assert group_id in block_table
             possible_hit_lens[group_id] = manager.get_possible_hit_lens(
                 block_is_computed)
-        print("possible_hit_lens", possible_hit_lens)
 
         intersect_hit_lens = intersect_multiple_sets(
             possible_hit_lens.values())
-        print("intersect_hit_lens", intersect_hit_lens)
 
         hit_len = -1
         for left, right in intersect_hit_lens[::-1]:
@@ -285,7 +286,6 @@ class CustomBlockManager:
                     break
             if hit_len != -1:
                 break
-        print("hit_len", hit_len)
 
         if hit_len == -1:
             hit_len = 0

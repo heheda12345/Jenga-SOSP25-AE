@@ -167,10 +167,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if cached_block_id is not None:
             self.metric_data.query(hit=True)
             block.block_id = cached_block_id
-            print("cache hit:", block.block_id)
             self._incr_refcount_cached_block(block)
             return block
-        print("cache miss")
+
         self.metric_data.query(hit=False)
         self._block_pool.free_block(block)
 
@@ -533,8 +532,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         for block_id in block_ids:
             if self._block_tracker[block_id].active:
                 self._block_tracker[block_id].last_accessed = now
-            elif block_id in self.evictor:
-                self.evictor.update(block_id, now)
+            # elif block_id in self.evictor:
+            #     self.evictor.update(block_id, now)
             else:
                 raise ValueError(
                     "Mark block as accessed which is not belonged to GPU")

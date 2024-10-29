@@ -116,8 +116,9 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
         block_table = self.block_tables[seq.seq_id]
-        self.custom_block_manager.append_token_ids(seq, block_table,
-                                                   num_lookahead_slots)
+        self.custom_block_manager.append_token_ids(
+            seq, block_table, num_lookahead_slots,
+            self._last_access_blocks_tracker)
         new_cows = self.global_block_allocator.clear_copy_on_writes()
         return new_cows
 

@@ -88,10 +88,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
+            allocator_type=allocator_type,
         )
 
     def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator):
+                 gpu_block_allocator: BlockAllocator, allocator_type: str):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
@@ -109,6 +110,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
+        self.allocator_type = allocator_type
 
     def allocate_or_get_null_block(self) -> Block:
         if self._null_block is None:

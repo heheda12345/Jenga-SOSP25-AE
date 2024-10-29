@@ -95,9 +95,9 @@ def get_dtype(cache_dtype: str, model_config: ModelConfig) -> torch.dtype:
     return STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
 
 
-def to_mutable_block(block_table: BlockTable,
-                     block_allocator: DeviceAwareBlockAllocator,
-                     from_idx: int):
+def suffix_to_mutable_block(block_table: BlockTable,
+                            block_allocator: DeviceAwareBlockAllocator,
+                            from_idx: int):
     next_block = None
     for idx, block in zip(
             range(len(block_table._blocks) - 1, from_idx - 1, -1),
@@ -113,6 +113,22 @@ def to_mutable_block(block_table: BlockTable,
             block_table._blocks[idx] = new_block
         else:
             next_block = block
+
+
+def prefix_to_null_block(block_table: BlockTable,
+                         block_allocator: DeviceAwareBlockAllocator,
+                         num_blocks: int):
+    if num_blocks <= 0:
+        return
+    null_block = block_allocator.allocate_or_get_null_block()
+    for idx, block in enumerate(block_table._blocks[:num_blocks]):
+        if block is not null_block:
+            block_allocator.free(block)
+            block_table._blocks[idx] = null_block
+    if num_blocks < len(block_table._blocks):
+        block_table._blocks[num_blocks]._prev_block = null_block
+        # do not need to compute hash based on prev_blocks
+        assert block_table._blocks[num_blocks]._cached_content_hash is not None
 
 
 class SelfAttentionManager(AppAwareManager):
@@ -146,7 +162,8 @@ class SelfAttentionManager(AppAwareManager):
         block_table = BlockTable(block_size=self.block_size,
                                  block_allocator=block_allocator,
                                  max_block_sliding_window=None,
-                                 group_id=group_id)
+                                 group_id=group_id,
+                                 seq_id=seq.seq_id)
         block_table.allocate(seq.get_token_ids())
 
         return block_table
@@ -166,7 +183,8 @@ class SelfAttentionManager(AppAwareManager):
         return num_token_blocks
 
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
-                         num_lookahead_slots: int):
+                         num_lookahead_slots: int,
+                         last_access_blocks_tracker: LastAccessBlocksTracker):
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
             seq.get_token_ids())
@@ -199,7 +217,7 @@ class SelfAttentionManager(AppAwareManager):
             block_allocator: DeviceAwareBlockAllocator):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
-        to_mutable_block(block_table, block_allocator, num_blocks)
+        suffix_to_mutable_block(block_table, block_allocator, num_blocks)
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(
@@ -244,7 +262,8 @@ class EncoderDecoderManager(AppAwareManager):
         block_table = BlockTable(block_size=self.block_size,
                                  block_allocator=block_allocator,
                                  max_block_sliding_window=None,
-                                 group_id=group_id)
+                                 group_id=group_id,
+                                 seq_id=encoder_seq.seq_id)
         encoder_seq_token_ids = encoder_seq.get_token_ids()
         if encoder_seq_token_ids:
             block_table.allocate(encoder_seq_token_ids)
@@ -255,7 +274,8 @@ class EncoderDecoderManager(AppAwareManager):
         # Encoder-decoder KV cache size is not changed during decoding
         return 0
 
-    def append_token_ids(self, seq, block_table, num_lookahead_slots):
+    def append_token_ids(self, seq, block_table, num_lookahead_slots,
+                         last_access_blocks_tracker: LastAccessBlocksTracker):
         # Encoder-decoder KV cache size is not changed during decoding
         pass
 
@@ -312,7 +332,8 @@ class SlidingWindowManager(AppAwareManager):
             block_size=self.block_size,
             block_allocator=block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
-            group_id=group_id)
+            group_id=group_id,
+            seq_id=seq.seq_id)
         block_table.allocate(seq.get_token_ids())
 
         return block_table
@@ -333,7 +354,8 @@ class SlidingWindowManager(AppAwareManager):
         return num_token_blocks
 
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
-                         num_lookahead_slots: int):
+                         num_lookahead_slots: int,
+                         last_access_blocks_tracker: LastAccessBlocksTracker):
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
             seq.get_token_ids())
@@ -343,6 +365,12 @@ class SlidingWindowManager(AppAwareManager):
         assert num_computed_slots is not None
         end_block_idx = (num_computed_slots //
                          self.block_size) - self.max_block_sliding_window
+        if block_table._allocator.allocator_type == "prefix_caching":
+            last_access_blocks_tracker.update_seq_blocks_last_access(
+                block_table._seq_id, [
+                    b.block_id for b in block_table._blocks[:end_block_idx]
+                    if b is not null_block
+                ])
         for idx in range(0, end_block_idx):
             b = block_table._blocks[idx]
             if b is not null_block:
@@ -388,7 +416,10 @@ class SlidingWindowManager(AppAwareManager):
         assert computed_tokens % self.block_size == 0
         num_blocks = computed_tokens // self.block_size
 
-        to_mutable_block(block_table, block_allocator, num_blocks)
+        suffix_to_mutable_block(block_table, block_allocator, num_blocks)
+        # 1 is a magic number to make the touched range a little larger
+        prefix_to_null_block(block_table, block_allocator,
+                             num_blocks - self.max_block_sliding_window - 1)
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(

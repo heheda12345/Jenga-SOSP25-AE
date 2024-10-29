@@ -65,6 +65,7 @@ class BlockMetaData():
         self.content_hash = content_hash
         self.num_hashed_tokens = num_hashed_tokens
         self.last_accessed = last_accessed
+        self.alive = True
 
 
 class LRUEvictor(Evictor):
@@ -85,7 +86,7 @@ class LRUEvictor(Evictor):
     def evict_block_id(self, block_id: int):
         print("Evicting block_id:", block_id)
         block = self.free_table[block_id]
-        self.free_table.pop(block_id)
+        block.alive = False
         return block_id, block.content_hash
 
     def evict(self) -> Tuple[int, int]:
@@ -97,6 +98,9 @@ class LRUEvictor(Evictor):
         # at the start of OrderedDict. Loop through all these blocks to
         # find the one with maximum number of hashed tokens.
         for _id, block in self.free_table.items():
+            if not block.alive:
+                self.free_table.pop(_id)
+                continue
             if evicted_block is None:
                 evicted_block, evicted_block_id = block, _id
                 continue
@@ -113,18 +117,37 @@ class LRUEvictor(Evictor):
 
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
+        if last_accessed == -1:
+            # a hack: sliding window may alloc a block and then free it without using it
+            # not remove it from the free_table, so that keep the orignal position
+            assert block_id in self.free_table
+            block_meta = self.free_table[block_id]
+            assert not block_meta.alive
+            assert block_meta.content_hash == content_hash
+            assert block_meta.num_hashed_tokens == num_hashed_tokens
+            block_meta.alive = True
+            return
+        if block_id in self.free_table:
+            # to upate the insert time in ordered dict
+            assert not self.free_table[block_id].alive
+            self.free_table.pop(block_id)
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
 
     def update(self, block_id: int, last_accessed: float):
+        raise AssertionError("This line should be unreachable.")
+        assert self.free_table[block_id].alive
         self.free_table[block_id].last_accessed = last_accessed
+        print("==============evictor update block_id:", block_id,
+              last_accessed)
 
     def remove(self, block_id: int):
         if block_id not in self.free_table:
             raise ValueError(
                 "Attempting to remove block that's not in the evictor")
-        self.free_table.pop(block_id)
+        assert self.free_table[block_id].alive
+        self.free_table[block_id].alive = False
 
     @property
     def num_blocks(self) -> int:
