@@ -282,6 +282,11 @@ class EncoderDecoderManager(AppAwareManager):
     def get_prefix_cache_alignment(self) -> int:
         return self.block_size
 
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        pass  # encoder-decoder kv cache is not support yet
+
 
 class SlidingWindowManager(AppAwareManager):
 
