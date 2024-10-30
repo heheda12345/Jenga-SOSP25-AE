@@ -690,8 +690,6 @@ def unified_flash_attention(
             # prefix-enabled attention
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
-            if window_size != (-1, -1):
-                raise NotImplementedError
             prefill_output = flash_attn_varlen_func(  # noqa
                 q=query,
                 k=key_cache,

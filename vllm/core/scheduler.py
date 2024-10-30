@@ -396,6 +396,8 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
+        self._cache_hit_tokens: Dict[int, int] = {} # {block_id: num_tokens}
+
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -1266,6 +1268,14 @@ class Scheduler:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
+                seq_id = seq_group.get_seqs(status=SequenceStatus.RUNNING)[0].seq_id
+                hit_tokens = len(common_computed_block_nums) * self.block_manager.block_size
+                if seq_id in self._cache_hit_tokens:
+                    self._cache_hit_tokens[seq_id] = max(
+                        hit_tokens,
+                        self._cache_hit_tokens[seq_id])
+                else:
+                    self._cache_hit_tokens[seq_id] = hit_tokens
 
             do_sample = True
             is_prompt = seq_group.is_prefill()
