@@ -406,6 +406,7 @@ class Scheduler:
         # will be stopped during schedule() call and added to this stop list
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
+        self._cache_hit_tokens: Dict[int, int] = {}  # {block_id: num_tokens}
 
     @property
     def next_cache_id(self):
@@ -1282,6 +1283,14 @@ class Scheduler:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
+                seq_id = seq_group.get_seqs(
+                    status=SequenceStatus.RUNNING)[0].seq_id
+                hit_tokens = common_computed_block_nums.computed_tokens
+                if seq_id in self._cache_hit_tokens:
+                    self._cache_hit_tokens[seq_id] = max(
+                        hit_tokens, self._cache_hit_tokens[seq_id])
+                else:
+                    self._cache_hit_tokens[seq_id] = hit_tokens
                 # print("common_computed_block_nums", common_computed_block_nums)
 
             do_sample = True

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass
 import math
 from typing import List, Optional, Dict, NewType, Tuple
@@ -10,7 +11,7 @@ from vllm.core.block.interfaces import (
 )
 from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
 from vllm.core.interfaces import ComputedBlock
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.core.block_v3.custom_block import AppAwareManager
@@ -212,13 +213,17 @@ class CustomBlockManager:
             self, seq_group: SequenceGroup,
             allocator: DeviceAwareBlockAllocator) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
-        for group_id in self.kv_cache_config.block_table_sharing.keys():
-            layer_ids = self.kv_cache_config.block_table_sharing[group_id]
-            manager = self._app_aware_managers[layer_ids[0]]
-            block = manager.allocate_sequence(seq_group, allocator, group_id)
-            if block is not None:
-                block.set_block_id_multiplier(len(layer_ids))
-                block_table[group_id] = block
+
+        with (allocator._allocators[Device.GPU].evictor.remove_by_mark_ctx()
+              if self.cache_config.enable_prefix_caching else nullcontext()):
+            for group_id in self.kv_cache_config.block_table_sharing.keys():
+                layer_ids = self.kv_cache_config.block_table_sharing[group_id]
+                manager = self._app_aware_managers[layer_ids[0]]
+                block = manager.allocate_sequence(seq_group, allocator,
+                                                  group_id)
+                if block is not None:
+                    block.set_block_id_multiplier(len(layer_ids))
+                    block_table[group_id] = block
         return block_table
 
     @require_kv_config_init
@@ -298,6 +303,10 @@ class CustomBlockManager:
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
                     hit_len, block_table[group_id], block_allocator)
+
+        if block_allocator.allocator_type == "prefix_caching":
+            block_allocator._allocators[
+                Device.GPU].evictor.confirm_all_remove()
 
         computed_block = ComputedBlock(computed_blocks, hit_len)
         computed_blocks_tracker.set_cached_compute_block(

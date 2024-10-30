@@ -256,9 +256,18 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Add the cached block to the evictor
         # (This keeps the cached block around so it can be reused)
-        self.evictor.add(block_id, block.content_hash, block.num_tokens_total,
-                         self._block_tracker[block_id].last_accessed)
-
+        if self._block_tracker[block_id].computed:
+            self.evictor.add(block_id, block.content_hash,
+                             block.num_tokens_total,
+                             self._block_tracker[block_id].last_accessed)
+        else:
+            # allocated and free immediately due to sliding window
+            # recover the `self._refcounter.decr(block_id)` in this funciton
+            self._refcounter.incr(block_id)
+            self._hashless_allocator.free(block, keep_block_object=True)
+            # recover the changes during allocate_immutable_block
+            self._cached_blocks.pop(block.content_hash)
+            self._touched_blocks.remove(block_id)
         # Stop tracking the block
         self._untrack_block_id(block_id)
 

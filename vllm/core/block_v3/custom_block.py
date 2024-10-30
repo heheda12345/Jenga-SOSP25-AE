@@ -153,7 +153,7 @@ class SelfAttentionManager(AppAwareManager):
                                 num_lookahead_slots: int = 0) -> int:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_tokens = len(seq.get_token_ids())
-        return cdiv(num_tokens, self.block_size) + num_lookahead_slots
+        return cdiv(num_tokens + num_lookahead_slots, self.block_size)
 
     def allocate_sequence(self, seq_group: SequenceGroup,
                           block_allocator: DeviceAwareBlockAllocator,
@@ -321,7 +321,7 @@ class SlidingWindowManager(AppAwareManager):
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_tokens = len(seq.get_token_ids())
         num_required_blocks = cdiv(num_tokens + num_lookahead_slots,
-                                   self.block_size)  # ????
+                                   self.block_size)
         # Do not calculate min here, as prefill phase allocates all blocks
         # num_required_blocks = min(num_required_blocks,
         #                           self.max_block_sliding_window)
@@ -340,7 +340,6 @@ class SlidingWindowManager(AppAwareManager):
             group_id=group_id,
             seq_id=seq.seq_id)
         block_table.allocate(seq.get_token_ids())
-
         return block_table
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
@@ -424,7 +423,7 @@ class SlidingWindowManager(AppAwareManager):
         suffix_to_mutable_block(block_table, block_allocator, num_blocks)
         # 1 is a magic number to make the touched range a little larger
         prefix_to_null_block(block_table, block_allocator,
-                             num_blocks - self.max_block_sliding_window - 1)
+                             num_blocks - self.max_block_sliding_window - 2)
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(

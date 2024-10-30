@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import enum
 from abc import ABC, abstractmethod
 from typing import OrderedDict, Tuple
@@ -78,6 +79,9 @@ class LRUEvictor(Evictor):
 
     def __init__(self):
         self.free_table: OrderedDict[int, BlockMetaData] = OrderedDict()
+        self._num_blocks = 0
+        self.mark_removed: set[int] = set()
+        self.remove_by_mark = False
 
     def __contains__(self, block_id: int) -> bool:
         return block_id in self.free_table
@@ -86,11 +90,10 @@ class LRUEvictor(Evictor):
     def evict_block_id(self, block_id: int):
         print("Evicting block_id:", block_id)
         block = self.free_table[block_id]
-        block.alive = False
         return block_id, block.content_hash
 
     def evict(self) -> Tuple[int, int]:
-        if len(self.free_table) == 0:
+        if self._num_blocks <= 0:
             raise ValueError("No usable cache memory left")
 
         evicted_block, evicted_block_id = None, None
@@ -98,8 +101,7 @@ class LRUEvictor(Evictor):
         # at the start of OrderedDict. Loop through all these blocks to
         # find the one with maximum number of hashed tokens.
         for _id, block in self.free_table.items():
-            if not block.alive:
-                self.free_table.pop(_id)
+            if _id in self.mark_removed:
                 continue
             if evicted_block is None:
                 evicted_block, evicted_block_id = block, _id
@@ -112,24 +114,26 @@ class LRUEvictor(Evictor):
         assert evicted_block is not None
         assert evicted_block_id is not None
         self.free_table.pop(evicted_block_id)
+        self._num_blocks -= 1
 
         return evicted_block_id, evicted_block.content_hash
 
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
+        self._num_blocks += 1
         if last_accessed == -1:
             # a hack: sliding window may alloc a block and then free it without using it
             # not remove it from the free_table, so that keep the orignal position
-            assert block_id in self.free_table
+            assert block_id in self.free_table, f"block_id: {block_id} not in free_table"
+            assert block_id in self.mark_removed, f"block_id: {block_id} not in mark_removed"
             block_meta = self.free_table[block_id]
-            assert not block_meta.alive
-            assert block_meta.content_hash == content_hash
+            assert block_meta.content_hash == content_hash, f"block_id: {block_id} content_hash not match"
             assert block_meta.num_hashed_tokens == num_hashed_tokens
-            block_meta.alive = True
+            self.mark_removed.remove(block_id)
             return
+        assert block_id not in self.mark_removed
         if block_id in self.free_table:
             # to upate the insert time in ordered dict
-            assert not self.free_table[block_id].alive
             self.free_table.pop(block_id)
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
@@ -143,15 +147,33 @@ class LRUEvictor(Evictor):
               last_accessed)
 
     def remove(self, block_id: int):
+        self._num_blocks -= 1
         if block_id not in self.free_table:
             raise ValueError(
                 "Attempting to remove block that's not in the evictor")
-        assert self.free_table[block_id].alive
-        self.free_table[block_id].alive = False
+
+        if self.remove_by_mark:
+            self.mark_removed.add(block_id)
+        else:
+            self.free_table.pop(block_id)
 
     @property
     def num_blocks(self) -> int:
-        return len(self.free_table)
+        return self._num_blocks
+
+    def confirm_all_remove(self):
+        for _id in self.mark_removed:
+            self.free_table.pop(_id)
+        self.mark_removed.clear()
+
+    @contextmanager
+    def remove_by_mark_ctx(self):
+        prev_remove_by_mark = self.remove_by_mark
+        self.remove_by_mark = True
+        try:
+            yield
+        finally:
+            self.remove_by_mark = prev_remove_by_mark
 
 
 def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
