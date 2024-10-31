@@ -189,6 +189,7 @@ class MistralTokenizer:
                 ]
                 ids = [
                     self.tokenizer._tekken_token2id_nospecial[t] + shift
+                    if t in self.tokenizer._tekken_token2id_nospecial else 100
                     for t in byte_tokens
                 ]
                 decoded = self.tokenizer.decode(ids)

@@ -29,7 +29,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig
-from vllm.core.block_v3.custom_block import SelfAttentionManager
+from vllm.core.block_v3.custom_block import SelfAttentionManager, SlidingWindowManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -63,10 +63,28 @@ def custom_block_manager_for_llama(model_config: ModelConfig,
                                    cache_config: CacheConfig,
                                    parallel_config: ParallelConfig):
     custom_managers = {}
+    if hasattr(model_config.hf_config, '_sliding_window'):
+        sliding_window = model_config.hf_config._sliding_window
+        if isinstance(sliding_window, int):
+            sliding_window = [sliding_window
+                              ] * model_config.get_num_layers(parallel_config)
+        elif isinstance(sliding_window, list):
+            assert model_config.get_num_layers(parallel_config) % len(
+                sliding_window) == 0
+            sliding_window = sliding_window * (
+                model_config.get_num_layers(parallel_config) //
+                len(sliding_window))
+    else:
+        sliding_window = [None] * model_config.get_num_layers(parallel_config)
     for i in range(model_config.get_num_layers(parallel_config)):
-        custom_managers[str(i)] = SelfAttentionManager(
-            model_config, parallel_config, cache_config.cache_dtype,
-            cache_config.block_size)
+        if sliding_window[i] is None:
+            custom_managers[str(i)] = SelfAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
+        else:
+            custom_managers[str(i)] = SlidingWindowManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size, sliding_window[i])
     return custom_managers
 
 
@@ -122,6 +140,7 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        sliding_window: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -183,6 +202,7 @@ class LlamaAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            sliding_window_size=sliding_window,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -232,6 +252,19 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+
+        sliding_window = None
+        if hasattr(config, "_sliding_window"):
+            layer_id = int(prefix.split('.')[-1])
+            if isinstance(config._sliding_window, list):
+                sliding_window = config._sliding_window[layer_id % len(
+                    config._sliding_window)]
+                print(f"Sliding window of layer {layer_id}: {sliding_window}")
+            elif isinstance(config._sliding_window, int):
+                sliding_window = config._sliding_window
+                print(f"Sliding window of layer {layer_id}: {sliding_window}")
+        if sliding_window is None:
+            sliding_window = -1
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -244,6 +277,7 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
+            sliding_window=sliding_window,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = LlamaMLP(

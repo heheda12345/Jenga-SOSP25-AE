@@ -340,6 +340,7 @@ class SlidingWindowManager(AppAwareManager):
             group_id=group_id,
             seq_id=seq.seq_id)
         block_table.allocate(seq.get_token_ids())
+        block_table.free_start = 0
         return block_table
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
@@ -367,19 +368,23 @@ class SlidingWindowManager(AppAwareManager):
 
         null_block = block_table._allocator.allocate_or_get_null_block()
         assert num_computed_slots is not None
-        end_block_idx = (num_computed_slots //
-                         self.block_size) - self.max_block_sliding_window
+        end_block_idx = (
+            num_computed_slots // self.block_size
+        ) - self.max_block_sliding_window - 12  # remove -12 for run test
+        end_block_idx = max(end_block_idx, 0)
         if block_table._allocator.allocator_type == "prefix_caching":
             last_access_blocks_tracker.update_seq_blocks_last_access(
                 block_table._seq_id, [
-                    b.block_id for b in block_table._blocks[:end_block_idx]
+                    b.block_id for b in
+                    block_table._blocks[block_table.free_start:end_block_idx]
                     if b is not null_block
                 ])
-        for idx in range(0, end_block_idx):
+        for idx in range(block_table.free_start, end_block_idx):
             b = block_table._blocks[idx]
             if b is not null_block:
                 block_table._allocator.free(b)
                 block_table._blocks[idx] = null_block
+        block_table.free_start = end_block_idx
 
         block_table.ensure_num_empty_slots(
             num_empty_slots=len(unseen_token_ids) + num_lookahead_slots)
@@ -423,7 +428,8 @@ class SlidingWindowManager(AppAwareManager):
         suffix_to_mutable_block(block_table, block_allocator, num_blocks)
         # 1 is a magic number to make the touched range a little larger
         prefix_to_null_block(block_table, block_allocator,
-                             num_blocks - self.max_block_sliding_window - 2)
+                             num_blocks - self.max_block_sliding_window -
+                             2)  # TODO: -1 here for run test
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(

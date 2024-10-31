@@ -93,6 +93,14 @@ def run_vllm(
     disable_async_output_proc: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
+    if 'mistralai' in model:
+        llm_args = {
+            "tokenizer_mode": "mistral",
+            "config_format": "mistral",
+            "load_format": "mistral"
+        }
+    else:
+        llm_args = {}
     llm = LLM(
         model=model,
         tokenizer=tokenizer,
@@ -112,11 +120,12 @@ def run_vllm(
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
         distributed_executor_backend=distributed_executor_backend,
-        load_format=load_format,
+        # load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
         use_per_layer_block_manager=use_per_layer_block_manager,
         disable_async_output_proc=disable_async_output_proc,
+        **llm_args,
     )
 
     # Add the requests to the engine.

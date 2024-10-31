@@ -36,7 +36,7 @@ class Attention(nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         prefix: str = "",
-        sliding_window: Optional[int] = None,
+        sliding_window_size: Optional[int] = None,
     ) -> None:
         super().__init__()
         # ALL sliding window is required to be provided by the model
@@ -48,6 +48,10 @@ class Attention(nn.Module):
             block_size = 16
         if num_kv_heads is None:
             num_kv_heads = num_heads
+
+        if sliding_window_size is not None:
+            if sliding_window_size == -1: sliding_window_size = None
+            sliding_window = sliding_window_size
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
