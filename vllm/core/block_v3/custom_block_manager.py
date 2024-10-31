@@ -17,7 +17,7 @@ from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.core.block_v3.custom_block import AppAwareManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
-from vllm.core.block_v3.range_utils import intersect_multiple_sets
+from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
 
 logger = init_logger(__name__)
 
@@ -274,8 +274,14 @@ class CustomBlockManager:
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
+
             possible_hit_lens[group_id] = manager.get_possible_hit_lens(
                 block_is_computed)
+            # print("possible_hit_lens",
+            #       group_id,
+            #       to_range(block_is_computed),
+            #       possible_hit_lens[group_id],
+            #       flush=True)
 
         intersect_hit_lens = intersect_multiple_sets(
             possible_hit_lens.values())
@@ -291,6 +297,7 @@ class CustomBlockManager:
                     break
             if hit_len != -1:
                 break
+        # print("hit_len", hit_len, flush=True)
 
         if hit_len == -1:
             hit_len = 0
@@ -303,10 +310,6 @@ class CustomBlockManager:
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
                     hit_len, block_table[group_id], block_allocator)
-
-        if block_allocator.allocator_type == "prefix_caching":
-            block_allocator._allocators[
-                Device.GPU].evictor.confirm_all_remove()
 
         computed_block = ComputedBlock(computed_blocks, hit_len)
         computed_blocks_tracker.set_cached_compute_block(

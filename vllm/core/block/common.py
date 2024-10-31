@@ -41,6 +41,12 @@ class RefCounter(RefCounterProtocol):
     def incr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
         pre_incr_refcount = self._refcounts[block_id]
+        # if block_id == 3697:
+        #     print(
+        #         f"incr block_id: {block_id}, pre_incr_refcount: {pre_incr_refcount}"
+        #     )
+        #     import traceback
+        #     traceback.print_stack()
 
         assert pre_incr_refcount >= 0
 
@@ -51,6 +57,10 @@ class RefCounter(RefCounterProtocol):
     def decr(self, block_id: BlockId) -> RefCount:
         assert block_id in self._refcounts
         refcount = self._refcounts[block_id]
+        # if block_id == 3697:
+        #     print(f"decr block_id: {block_id}, refcount: {refcount}")
+        #     import traceback
+        #     traceback.print_stack()
 
         assert refcount > 0
         refcount -= 1

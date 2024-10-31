@@ -122,6 +122,11 @@ class LRUEvictor(Evictor):
             last_accessed: float):
         self._num_blocks += 1
         if last_accessed == -1:
+            # if block_id == 3697:
+            #     print("==============evictor recover block_id:", block_id,
+            #           content_hash, num_hashed_tokens, last_accessed)
+            #     import traceback
+            #     traceback.print_stack()
             # a hack: sliding window may alloc a block and then free it without using it
             # not remove it from the free_table, so that keep the orignal position
             assert block_id in self.free_table, f"block_id: {block_id} not in free_table"
@@ -131,6 +136,11 @@ class LRUEvictor(Evictor):
             assert block_meta.num_hashed_tokens == num_hashed_tokens
             self.mark_removed.remove(block_id)
             return
+        # if block_id == 3697:
+        #     print("==============evictor add block_id:", block_id,
+        #           content_hash, num_hashed_tokens, last_accessed)
+        #     import traceback
+        #     traceback.print_stack()
         assert block_id not in self.mark_removed
         if block_id in self.free_table:
             # to upate the insert time in ordered dict
@@ -147,6 +157,11 @@ class LRUEvictor(Evictor):
               last_accessed)
 
     def remove(self, block_id: int):
+        # if block_id == 3697:
+        #     print("==============evictor remove block_id:", block_id,
+        #           self.remove_by_mark)
+        #     import traceback
+        #     traceback.print_stack()
         self._num_blocks -= 1
         if block_id not in self.free_table:
             raise ValueError(
@@ -164,6 +179,11 @@ class LRUEvictor(Evictor):
     def confirm_all_remove(self):
         for _id in self.mark_removed:
             self.free_table.pop(_id)
+            # if _id == 3697:
+            #     print("==============evictor confirm_all_remove block_id:",
+            #           _id)
+            #     import traceback
+            #     traceback.print_stack()
         self.mark_removed.clear()
 
     @contextmanager

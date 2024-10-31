@@ -1385,6 +1385,10 @@ class Scheduler:
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
 
+        if self.scheduler_config.use_per_layer_block_manager and self.cache_config.enable_prefix_caching:
+            self.block_manager.global_block_allocator._allocators[
+                Device.GPU].evictor.confirm_all_remove()
+
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
@@ -1401,6 +1405,7 @@ class Scheduler:
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 self.free_seq(seq)
+                print("free seq", seq.seq_id)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
         if seq_group.is_finished():
@@ -1440,6 +1445,10 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+            # print("allocate seq", seq.seq_id)
+            # if seq.seq_id == 0:
+            #     import pdb
+            #     pdb.set_trace()
 
     def _append_slots(self,
                       seq_group: SequenceGroup,
@@ -1506,7 +1515,7 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        if self.num_cumulative_preemption % 50 == 0:
+        if self.num_cumulative_preemption % 1 == 0:
             logger.warning(
                 "Sequence group %s is preempted by %s mode because there is "
                 "not enough KV cache space. This can affect the end-to-end "

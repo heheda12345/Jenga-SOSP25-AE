@@ -43,6 +43,20 @@ def intersect_multiple_sets(sets):
     return result
 
 
+def to_range(bool_list):
+    true_ranges = []
+    start_idx = -1
+    for i, b in enumerate(bool_list):
+        if b and start_idx == -1:
+            start_idx = i
+        elif not b and start_idx != -1:
+            true_ranges.append((start_idx, i - 1))
+            start_idx = -1
+    if start_idx != -1:
+        true_ranges.append((start_idx, len(bool_list) - 1))
+    return true_ranges
+
+
 if __name__ == '__main__':
     sets = [[(1, 5), (10, 14), (16, 18)], [(2, 6), (8, 12), (15, 17)],
             [(3, 7), (9, 11), (13, 19)]]

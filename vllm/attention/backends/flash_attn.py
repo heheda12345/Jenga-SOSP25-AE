@@ -15,7 +15,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            is_block_tables_empty)
 from vllm.core.block_v3.custom_block import SlidingWindowManager
 from vllm.forward_context import get_forward_context
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import Timer, async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+
+# timer_window_prefill = Timer(unit="ms", color=True)
+# timer_window_decode = Timer(unit="ms", color=True)
+# timer_self_prefill = Timer(unit="ms", color=True)
+# timer_self_decode = Timer(unit="ms", color=True)
 
 
 class FlashAttentionBackend(AttentionBackend):
