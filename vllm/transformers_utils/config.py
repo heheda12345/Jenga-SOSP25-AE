@@ -17,7 +17,8 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, CharacterConfig,
+                                             DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
@@ -58,6 +59,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "solar": SolarConfig,
     "ultravox": UltravoxConfig,
     "qwen2_vl": Qwen2VLConfig,
+    "character": CharacterConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

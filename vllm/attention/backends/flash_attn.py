@@ -14,7 +14,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.forward_context import get_forward_context
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import Timer, async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+
+timer_window_prefill = Timer(unit="ms", color=True)
+timer_window_decode = Timer(unit="ms", color=True)
+timer_self_prefill = Timer(unit="ms", color=True)
+timer_self_decode = Timer(unit="ms", color=True)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -528,6 +533,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
+        print("attention.sliding_window", self.sliding_window)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -672,6 +678,11 @@ def unified_flash_attention(
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
+            # torch.cuda.synchronize()
+            # if window_size[0] == -1:
+            #     timer_self_prefill.start()
+            # else:
+            #     timer_window_prefill.start()
             prefill_output = flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -686,8 +697,14 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             )
+            # torch.cuda.synchronize()
+            # if window_size[0] == -1:
+            #     timer_self_prefill.log()
+            # else:
+            #     timer_window_prefill.log()
         else:
             # prefix-enabled attention
+            # raise NotImplementedError("Prefix cache is not supported.")
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
@@ -711,6 +728,11 @@ def unified_flash_attention(
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
         assert decode_meta.max_decode_query_len is not None
+        # torch.cuda.synchronize()
+        # if window_size[0] == -1:
+        #     timer_self_decode.start()
+        # else:
+        #     timer_window_decode.start() 
         if decode_meta.max_decode_query_len > 1:
             if window_size[0] != -1:
                 raise NotImplementedError
@@ -743,6 +765,11 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
+        # torch.cuda.synchronize()
+        # if window_size[0] == -1:
+        #     timer_self_decode.log()
+        # else:
+        #     timer_window_decode.log()
 
     if prefill_output is None:
         assert decode_output is not None

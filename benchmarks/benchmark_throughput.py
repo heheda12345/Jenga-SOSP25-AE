@@ -93,11 +93,16 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
     if 'mistralai' in model:
+        assert load_format == 'auto'
         llm_args = {
-            "tokenizer_mode": "mistral", "config_format": "mistral", "load_format": "mistral"
+            "tokenizer_mode": "mistral",
+            "config_format": "mistral",
+            "load_format": "mistral"
         }
     else:
-        llm_args = {}
+        llm_args = {
+            "load_format": load_format,
+        }
     llm = LLM(
         model=model,
         tokenizer=tokenizer,

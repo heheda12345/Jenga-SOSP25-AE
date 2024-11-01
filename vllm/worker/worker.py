@@ -245,6 +245,10 @@ class Worker(LocalOrDistributedWorkerBase):
                  peak_memory) // cache_block_size)
             num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                                  cache_block_size)
+        logger.info("Available GPU memory: %d GB, Total GPU memory: %d GB",
+                    (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+                 peak_memory) / 1024 / 1024 / 1024,
+                    total_gpu_memory / 1024 / 1024 / 1024)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.model_runner.lora_manager:
