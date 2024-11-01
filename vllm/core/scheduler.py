@@ -1445,10 +1445,7 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
-            # print("allocate seq", seq.seq_id)
-            # if seq.seq_id == 0:
-            #     import pdb
-            #     pdb.set_trace()
+            print("allocate seq", seq.seq_id)
 
     def _append_slots(self,
                       seq_group: SequenceGroup,

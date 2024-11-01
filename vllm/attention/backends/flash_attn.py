@@ -577,6 +577,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
+        print("sliding_window", self.sliding_window)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.

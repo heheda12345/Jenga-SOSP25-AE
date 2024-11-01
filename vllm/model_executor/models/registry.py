@@ -28,6 +28,7 @@ _TEXT_GENERATION_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
+    "CharacterForCausalLM": ("character", "CharacterForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),

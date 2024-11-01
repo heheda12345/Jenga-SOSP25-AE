@@ -94,13 +94,16 @@ def run_vllm(
 ) -> float:
     from vllm import LLM, SamplingParams
     if 'mistralai' in model:
+        assert load_format == 'auto'
         llm_args = {
             "tokenizer_mode": "mistral",
             "config_format": "mistral",
             "load_format": "mistral"
         }
     else:
-        llm_args = {}
+        llm_args = {
+            "load_format": load_format,
+        }
     llm = LLM(
         model=model,
         tokenizer=tokenizer,
@@ -145,9 +148,26 @@ def run_vllm(
     use_beam_search = False
 
     if not use_beam_search:
+        # with torch.profiler.profile(
+        #         activities=[
+        #             torch.profiler.ProfilerActivity.CPU,
+        #             torch.profiler.ProfilerActivity.CUDA,
+        #         ],
+        #         with_stack=True,
+        #         on_trace_ready=torch.profiler.tensorboard_trace_handler(
+        #             str('./trace'))) as p:
+        # from vllm.attention.backends.flash_attn import timer_self_prefill, timer_self_decode, timer_window_prefill, timer_window_decode
+        # timer_self_prefill.clear()
+        # timer_self_decode.clear()
+        # timer_window_prefill.clear()
+        # timer_window_decode.clear()
         start = time.perf_counter()
         llm.generate(prompts, sampling_params, use_tqdm=True)
         end = time.perf_counter()
+        # timer_self_prefill.report(text="self_prefill")
+        # timer_self_decode.report(text="self_decode")
+        # timer_window_prefill.report(text="window_prefill")
+        # timer_window_decode.report(text="window_decode")
     else:
         prompts = [prompt for prompt, _, _ in requests]
         # output_len should be the same for all requests.
