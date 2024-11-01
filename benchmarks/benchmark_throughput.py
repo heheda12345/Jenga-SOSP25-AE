@@ -92,6 +92,12 @@ def run_vllm(
     disable_async_output_proc: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
+    if 'mistralai' in model:
+        llm_args = {
+            "tokenizer_mode": "mistral", "config_format": "mistral", "load_format": "mistral"
+        }
+    else:
+        llm_args = {}
     llm = LLM(
         model=model,
         tokenizer=tokenizer,
@@ -111,10 +117,11 @@ def run_vllm(
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
         distributed_executor_backend=distributed_executor_backend,
-        load_format=load_format,
+        # load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
+        **llm_args
     )
 
     # Add the requests to the engine.
@@ -134,9 +141,26 @@ def run_vllm(
     use_beam_search = False
 
     if not use_beam_search:
+        # with torch.profiler.profile(
+        #         activities=[
+        #             torch.profiler.ProfilerActivity.CPU,
+        #             torch.profiler.ProfilerActivity.CUDA,
+        #         ],
+        #         with_stack=True,
+        #         on_trace_ready=torch.profiler.tensorboard_trace_handler(
+        #             str('./trace'))) as p:
+        # from vllm.attention.backends.flash_attn import timer_self_prefill, timer_self_decode, timer_window_prefill, timer_window_decode
+        # timer_self_prefill.clear()
+        # timer_self_decode.clear()
+        # timer_window_prefill.clear()
+        # timer_window_decode.clear()
         start = time.perf_counter()
         llm.generate(prompts, sampling_params, use_tqdm=True)
         end = time.perf_counter()
+        # timer_self_prefill.report(text="self_prefill")
+        # timer_self_decode.report(text="self_decode")
+        # timer_window_prefill.report(text="window_prefill")
+        # timer_window_decode.report(text="window_decode")
     else:
         prompts = [prompt for prompt, _, _ in requests]
         # output_len should be the same for all requests.
@@ -324,7 +348,16 @@ def main(args: argparse.Namespace):
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
-        prompt = "hi" * (args.input_len - 1)
+        # As tokenizer may add additional tokens like BOS, we need to try
+        # different lengths to get the desired input length.
+        for i in range(-10, 10):
+            prompt = "hi " * (args.input_len + i)
+            tokenized_prompt = tokenizer(prompt).input_ids
+            if len(tokenized_prompt) == args.input_len:
+                break
+        else:
+            raise ValueError(
+                f"Failed to synthesize a prompt with {args.input_len} tokens.")
         requests = [(prompt, args.input_len, args.output_len)
                     for _ in range(args.num_prompts)]
     else:

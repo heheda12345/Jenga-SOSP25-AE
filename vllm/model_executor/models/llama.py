@@ -108,6 +108,7 @@ class LlamaAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        sliding_window: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -172,6 +173,7 @@ class LlamaAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            sliding_window_size=sliding_window,
         )
 
     def forward(
@@ -212,6 +214,19 @@ class LlamaDecoderLayer(nn.Module):
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
+        
+        sliding_window = None
+        if hasattr(config, "_sliding_window"):
+            layer_id = int(prefix.split('.')[-1])
+            if isinstance(config._sliding_window, list):
+                sliding_window = config._sliding_window[layer_id % len(config._sliding_window)]
+                print(f"Sliding window of layer {layer_id}: {sliding_window}")
+            elif isinstance(config._sliding_window, int):
+                sliding_window = config._sliding_window
+                print(f"Sliding window of layer {layer_id}: {sliding_window}")
+        if sliding_window is None:
+            sliding_window = -1
+
         self.self_attn = LlamaAttention(
             config=config,
             hidden_size=self.hidden_size,
@@ -224,6 +239,7 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
+            sliding_window=sliding_window,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = LlamaMLP(
