@@ -52,6 +52,8 @@ class Attention(nn.Module):
         if sliding_window_size is not None:
             if sliding_window_size == -1: sliding_window_size = None
             sliding_window = sliding_window_size
+        else:
+            sliding_window = -1
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with

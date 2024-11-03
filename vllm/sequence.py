@@ -117,6 +117,8 @@ class RequestMetrics:
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
     scheduler_time: Optional[float] = None
+    scheduler_raw_time: Optional[float] = None
+    schedule_meta_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
 

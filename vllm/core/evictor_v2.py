@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import enum
 from abc import ABC, abstractmethod
 from typing import OrderedDict, Tuple
+from sortedcontainers import SortedDict
 
 
 class EvictionPolicy(enum.Enum):
@@ -62,10 +63,11 @@ class BlockMetaData():
     """
 
     def __init__(self, content_hash: int, num_hashed_tokens: int,
-                 last_accessed: float):
+                 last_accessed: float, block_id: int):
         self.content_hash = content_hash
         self.num_hashed_tokens = num_hashed_tokens
         self.last_accessed = last_accessed
+        self.block_id = block_id
         self.alive = True
 
 
@@ -78,7 +80,10 @@ class LRUEvictor(Evictor):
     """
 
     def __init__(self):
-        self.free_table: OrderedDict[int, BlockMetaData] = OrderedDict()
+        self.free_table: OrderedDict[
+            int, BlockMetaData] = OrderedDict()  # hash -> block_meta
+        self.sorted_table: SortedDict[(int, int, int), int] = SortedDict(
+        )  # (last_accessed, -num_hashed_tokens, block_id) -> hash
         self._num_blocks = 0
         self.mark_removed: set[int] = set()
         self.remove_by_mark = False
@@ -88,35 +93,21 @@ class LRUEvictor(Evictor):
 
     # force eviction, for testing only
     def evict_block_id(self, block_id: int):
-        print("Evicting block_id:", block_id)
-        block = self.free_table[block_id]
+        # print("Evicting block_id:", block_id)
+        block = self.free_table.pop(block_id)
+        self.sorted_table.pop(
+            (block.last_accessed, -block.num_hashed_tokens, block.block_id))
         return block_id, block.content_hash
 
     def evict(self) -> Tuple[int, int]:
         if self._num_blocks <= 0:
             raise ValueError("No usable cache memory left")
 
-        evicted_block, evicted_block_id = None, None
-        # The blocks with the lowest timestamps should be placed consecutively
-        # at the start of OrderedDict. Loop through all these blocks to
-        # find the one with maximum number of hashed tokens.
-        for _id, block in self.free_table.items():
-            if _id in self.mark_removed:
-                continue
-            if evicted_block is None:
-                evicted_block, evicted_block_id = block, _id
-                continue
-            if evicted_block.last_accessed < block.last_accessed:
-                break
-            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
-                evicted_block, evicted_block_id = block, _id
-
-        assert evicted_block is not None
-        assert evicted_block_id is not None
-        self.free_table.pop(evicted_block_id)
+        evicted_block_id = self.sorted_table.popitem(0)[0][2]
+        evicted_block = self.free_table.pop(evicted_block_id)
         self._num_blocks -= 1
 
-        return evicted_block_id, evicted_block.content_hash
+        return evicted_block.block_id, evicted_block.content_hash
 
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
@@ -135,6 +126,8 @@ class LRUEvictor(Evictor):
             assert block_meta.content_hash == content_hash, f"block_id: {block_id} content_hash not match"
             assert block_meta.num_hashed_tokens == num_hashed_tokens
             self.mark_removed.remove(block_id)
+            self.sorted_table[(block_meta.last_accessed, -num_hashed_tokens,
+                               block_id)] = content_hash
             return
         # if block_id == 3697:
         #     print("==============evictor add block_id:", block_id,
@@ -144,10 +137,15 @@ class LRUEvictor(Evictor):
         assert block_id not in self.mark_removed
         if block_id in self.free_table:
             # to upate the insert time in ordered dict
-            self.free_table.pop(block_id)
+            block_meta = self.free_table.pop(block_id)
+            self.sorted_table.pop(
+                (block_meta.last_accessed, -block_meta.num_hashed_tokens,
+                 block_meta.block_id))
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
-                                                  last_accessed)
+                                                  last_accessed, block_id)
+        self.sorted_table[(last_accessed, -num_hashed_tokens,
+                           block_id)] = content_hash
 
     def update(self, block_id: int, last_accessed: float):
         raise AssertionError("This line should be unreachable.")
@@ -166,6 +164,11 @@ class LRUEvictor(Evictor):
         if block_id not in self.free_table:
             raise ValueError(
                 "Attempting to remove block that's not in the evictor")
+        block_meta = self.free_table[block_id]
+
+        self.sorted_table.pop(
+            (block_meta.last_accessed, -block_meta.num_hashed_tokens,
+             block_meta.block_id))
 
         if self.remove_by_mark:
             self.mark_removed.add(block_id)

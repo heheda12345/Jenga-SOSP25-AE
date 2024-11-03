@@ -55,6 +55,7 @@ def test_gemma_eviction():
     evict_result = []
     for i in range(26):
         evict_result.append(evictor.evict()[0])
+    print("evict_result:", evict_result)
 
     for old, new in zip(evict_result[:-1], evict_result[1:]):
         assert evict_time[old] <= evict_time[new]
