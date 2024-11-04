@@ -125,19 +125,25 @@ def main(args):
             fixed_output_len=args.output_len,
         )
     else:
-        prompt_len = len(tokenizer(PROMPT).input_ids)
-        filtered_datasets = [(PROMPT, prompt_len, args.output_len)
-                             ] * args.num_prompts
+        filtered_datasets = []
+        for i in range(args.num_prompts):
+            prompt = f"Task {i}: {PROMPT}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            filtered_datasets.append((prompt, prompt_len, args.output_len))
 
     llm = LLM(model=args.model,
               tokenizer_mode='auto',
               trust_remote_code=True,
               enforce_eager=True,
               use_v2_block_manager=args.use_v2_block_manager,
+              use_per_layer_block_manager=args.use_per_layer_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=args.enable_prefix_caching,
+              disable_log_stats=False)
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=args.output_len,
+                                     ignore_eos=args.ignore_eos)
 
     print("Testing filtered datasets")
     prompts = repeat_and_sort_requests(filtered_datasets,
@@ -178,6 +184,9 @@ if __name__ == "__main__":
     parser.add_argument('--use-v2-block-manager',
                         action='store_true',
                         help='Use BlockSpaceMangerV2')
+    parser.add_argument('--use-per-layer-block-manager',
+                        action='store_true',
+                        help='Use PerLayerBlockManger')
     parser.add_argument('--num-prompts',
                         type=int,
                         default=1,
@@ -198,5 +207,9 @@ if __name__ == "__main__":
                         type=int,
                         default=0,
                         help='Random seed for reproducibility')
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request.")
     args = parser.parse_args()
     main(args)

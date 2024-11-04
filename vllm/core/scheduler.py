@@ -16,7 +16,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
-from vllm.utils import Device, PyObjectCache
+from vllm.utils import Device, PyObjectCache, Timer
 
 logger = init_logger(__name__)
 
@@ -26,6 +26,8 @@ ENABLE_ARTIFICIAL_PREEMPT = bool(
     os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
 ARTIFICIAL_PREEMPTION_PROB = 0.5
 ARTIFICIAL_PREEMPTION_MAX_CNT = 500
+
+schedule_timer = Timer()
 
 
 class PreemptionMode(enum.Enum):
@@ -1233,8 +1235,12 @@ class Scheduler:
         # such as self.running, self.swapped, and self.waiting.
         scheduler_start_time = time.perf_counter()
 
+        # Call free_skipped_blocks here instead of in append_slots. So it can be freed after prefill, and preserve space for other prefills.
+        for seq_group in self.running:
+            self.block_manager.free_skipped_blocks(seq_group.seqs[0])
         scheduler_outputs: SchedulerOutputs = self._schedule()
-        now = time.time()
+        scheduler_raw_end_time = time.perf_counter()
+        now = self.block_manager._last_access_blocks_tracker.next_time()
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1245,6 +1251,7 @@ class Scheduler:
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, scheduled_seq_group in enumerate(
                 scheduler_outputs.scheduled_seq_groups):
+            seq_group_metadata_builder_start_time = time.perf_counter()
             seq_group = scheduled_seq_group.seq_group
             token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
@@ -1359,6 +1366,16 @@ class Scheduler:
             if allow_async_output_proc:
                 allow_async_output_proc = self._allow_async_output_proc(
                     seq_group)
+            seq_group_metadata_builder_end_time = time.perf_counter()
+            if seq_group.metrics is not None:
+                if seq_group.metrics.schedule_meta_time is not None:
+                    seq_group.metrics.schedule_meta_time += (
+                        seq_group_metadata_builder_end_time -
+                        seq_group_metadata_builder_start_time)
+                else:
+                    seq_group.metrics.schedule_meta_time = (
+                        seq_group_metadata_builder_end_time -
+                        seq_group_metadata_builder_start_time)
 
         # Now that the batch has been created, we can assume all blocks in the
         # batch will have been computed before the next scheduling invocation.
@@ -1371,6 +1388,10 @@ class Scheduler:
 
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
+        if self.scheduler_config.use_per_layer_block_manager and self.cache_config.enable_prefix_caching:
+            self.block_manager.global_block_allocator._allocators[
+                Device.GPU].evictor.confirm_all_remove()
+
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently
         # running. This will help estimate if the scheduler is a significant
@@ -1381,13 +1402,16 @@ class Scheduler:
                     seq_group.metrics.scheduler_time += scheduler_time
                 else:
                     seq_group.metrics.scheduler_time = scheduler_time
+                if seq_group.metrics.scheduler_raw_time is not None:
+                    seq_group.metrics.scheduler_raw_time += (
+                        scheduler_raw_end_time - scheduler_start_time)
+                else:
+                    seq_group.metrics.scheduler_raw_time = (
+                        scheduler_raw_end_time - scheduler_start_time)
+                break
 
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
-
-        if self.scheduler_config.use_per_layer_block_manager and self.cache_config.enable_prefix_caching:
-            self.block_manager.global_block_allocator._allocators[
-                Device.GPU].evictor.confirm_all_remove()
 
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,

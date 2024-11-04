@@ -116,9 +116,8 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
         block_table = self.block_tables[seq.seq_id]
-        self.custom_block_manager.append_token_ids(
-            seq, block_table, num_lookahead_slots,
-            self._last_access_blocks_tracker)
+        self.custom_block_manager.append_token_ids(seq, block_table,
+                                                   num_lookahead_slots)
         new_cows = self.global_block_allocator.clear_copy_on_writes()
         return new_cows
 
@@ -214,6 +213,14 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         """Prefix cache hit rate. -1 means not supported or disabled."""
         return self.global_block_allocator.get_prefix_cache_hit_rate(
             Device.GPU)
+
+    def free_skipped_blocks(
+        self,
+        seq: Sequence,
+    ):
+        block_table = self.block_tables[seq.seq_id]
+        self.custom_block_manager.free_skipped_blocks(
+            seq, block_table, self._last_access_blocks_tracker)
 
     # for the compatibility with current Scheduler. Can be removed later
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:

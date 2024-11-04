@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from dataclasses import dataclass
 import enum
 from abc import ABC, abstractmethod
 from typing import OrderedDict, Tuple
@@ -54,6 +55,7 @@ class Evictor(ABC):
         pass
 
 
+@dataclass
 class BlockMetaData():
     """Data structure for storing key data describe cached block, so that
     evitor could use to make its decision which one to choose for eviction

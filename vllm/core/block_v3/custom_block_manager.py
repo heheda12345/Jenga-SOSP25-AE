@@ -241,17 +241,14 @@ class CustomBlockManager:
         return total_blocks
 
     @require_kv_config_init
-    def append_token_ids(
-            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-            num_lookahead_slots: int,
-            last_access_blocks_tracker: LastAccessBlocksTracker) -> int:
+    def append_token_ids(self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
+                         num_lookahead_slots: int) -> int:
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
             manager.append_token_ids(seq, block_table[group_id],
-                                     num_lookahead_slots,
-                                     last_access_blocks_tracker)
+                                     num_lookahead_slots)
 
     @require_kv_config_init
     def get_common_computed_block_ids(
@@ -326,3 +323,14 @@ class CustomBlockManager:
             assert group_id in block_table
             manager.update_seq_blocks_last_access(seq, block_table[group_id],
                                                   last_access_blocks_tracker)
+
+    @require_kv_config_init
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            manager = self._app_aware_managers[
+                self.kv_cache_config.block_table_sharing[group_id][0]]
+            assert group_id in block_table
+            manager.free_skipped_blocks(seq, block_table[group_id],
+                                        last_access_blocks_tracker)

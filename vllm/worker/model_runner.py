@@ -2026,7 +2026,6 @@ def _get_graph_batch_size(batch_size: int) -> int:
     if batch_size <= 10:
         return batch_size
     else:
-        logger.warning("padded batchsize {}".format(batch_size))
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 

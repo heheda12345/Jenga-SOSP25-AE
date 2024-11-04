@@ -71,6 +71,12 @@ class AppAwareManager:
             last_access_blocks_tracker: LastAccessBlocksTracker):
         raise NotImplementedError
 
+    @abstractmethod
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        raise NotImplementedError
+
 
 AppAwareAttnMetadataBuilder = AppAwareManager
 
@@ -183,8 +189,7 @@ class SelfAttentionManager(AppAwareManager):
         return num_token_blocks
 
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
-                         num_lookahead_slots: int,
-                         last_access_blocks_tracker: LastAccessBlocksTracker):
+                         num_lookahead_slots: int):
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
             seq.get_token_ids())
@@ -225,6 +230,11 @@ class SelfAttentionManager(AppAwareManager):
             last_access_blocks_tracker: LastAccessBlocksTracker):
         last_access_blocks_tracker.update_seq_blocks_last_access(
             seq.seq_id, block_table.physical_block_ids)
+
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        pass
 
 
 class EncoderDecoderManager(AppAwareManager):
@@ -274,8 +284,7 @@ class EncoderDecoderManager(AppAwareManager):
         # Encoder-decoder KV cache size is not changed during decoding
         return 0
 
-    def append_token_ids(self, seq, block_table, num_lookahead_slots,
-                         last_access_blocks_tracker: LastAccessBlocksTracker):
+    def append_token_ids(self, seq, block_table, num_lookahead_slots):
         # Encoder-decoder KV cache size is not changed during decoding
         pass
 
@@ -286,6 +295,11 @@ class EncoderDecoderManager(AppAwareManager):
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
         pass  # encoder-decoder kv cache is not support yet
+
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        pass
 
 
 class SlidingWindowManager(AppAwareManager):
@@ -359,32 +373,10 @@ class SlidingWindowManager(AppAwareManager):
         return num_token_blocks
 
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,
-                         num_lookahead_slots: int,
-                         last_access_blocks_tracker: LastAccessBlocksTracker):
+                         num_lookahead_slots: int):
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
             seq.get_token_ids())
-        num_computed_slots = seq.data.get_num_computed_tokens()
-
-        null_block = block_table._allocator.allocate_or_get_null_block()
-        assert num_computed_slots is not None
-        end_block_idx = (
-            num_computed_slots // self.block_size
-        ) - self.max_block_sliding_window - 12  # remove -12 for run test
-        end_block_idx = max(end_block_idx, 0)
-        if block_table._allocator.allocator_type == "prefix_caching":
-            last_access_blocks_tracker.update_seq_blocks_last_access(
-                block_table._seq_id, [
-                    b.block_id for b in
-                    block_table._blocks[block_table.free_start:end_block_idx]
-                    if b is not null_block
-                ])
-        for idx in range(block_table.free_start, end_block_idx):
-            b = block_table._blocks[idx]
-            if b is not null_block:
-                block_table._allocator.free(b)
-                block_table._blocks[idx] = null_block
-        block_table.free_start = end_block_idx
 
         block_table.ensure_num_empty_slots(
             num_empty_slots=len(unseen_token_ids) + num_lookahead_slots)
@@ -399,6 +391,32 @@ class SlidingWindowManager(AppAwareManager):
                                                  token_block)
 
         block_table._num_full_slots += len(unseen_token_ids)
+
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        num_computed_slots = seq.data.get_num_computed_tokens()
+        null_block = block_table._allocator.allocate_or_get_null_block()
+        assert num_computed_slots is not None
+        end_block_idx = (
+            num_computed_slots // self.block_size
+        ) - self.max_block_sliding_window - 12  # remove -12 for run test
+        end_block_idx = max(end_block_idx, 0)
+        # if block_table.free_start < end_block_idx:
+        #     print("free_skipped_blocks", block_table.free_start, end_block_idx)
+        if block_table._allocator.allocator_type == "prefix_caching":
+            last_access_blocks_tracker.update_seq_blocks_last_access(
+                block_table._seq_id, [
+                    b.block_id for b in
+                    block_table._blocks[block_table.free_start:end_block_idx]
+                    if b is not null_block
+                ], -200)
+        for idx in range(block_table.free_start, end_block_idx):
+            b = block_table._blocks[idx]
+            if b is not null_block:
+                block_table._allocator.free(b)
+                block_table._blocks[idx] = null_block
+        block_table.free_start = end_block_idx
 
     def get_prefix_cache_alignment(self) -> int:
         return self.block_size

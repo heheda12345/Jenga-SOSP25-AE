@@ -1017,6 +1017,7 @@ class LastAccessBlocksTracker:
     def __init__(self, allocator):
         self._allocator = allocator
         self._seq_last_access: Dict[int, Optional[float]] = {}
+        self.now = 1000
 
     def add_seq(self, seq_id: int) -> None:
         """Start tracking seq_id
@@ -1034,8 +1035,10 @@ class LastAccessBlocksTracker:
         assert seq_id in self._seq_last_access
         self._seq_last_access[seq_id] = time
 
-    def update_seq_blocks_last_access(self, seq_id: int,
-                                      block_ids: List[int]) -> None:
+    def update_seq_blocks_last_access(self,
+                                      seq_id: int,
+                                      block_ids: List[int],
+                                      delta: int = 0) -> None:
         assert seq_id in self._seq_last_access
 
         ts = self._seq_last_access[seq_id]
@@ -1044,7 +1047,13 @@ class LastAccessBlocksTracker:
             # No last access was recorded, no need to update.
             return
 
-        self._allocator.mark_blocks_as_accessed(block_ids, ts)
+        # seq_id / 100, so that the eviction will be centralized to one request
+        self._allocator.mark_blocks_as_accessed(block_ids,
+                                                ts + delta + seq_id / 100)
+
+    def next_time(self):
+        self.now += 1
+        return self.now
 
 
 def assert_prefix_caching_block_or_none(block: Optional[Block]):
