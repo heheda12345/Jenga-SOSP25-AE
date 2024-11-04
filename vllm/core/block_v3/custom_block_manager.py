@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import math
 from typing import List, Optional, Dict, NewType, Tuple
 
-from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import (
     Block,
@@ -83,9 +83,10 @@ class KVCacheScheduleConfig:
 class CustomBlockManager:
 
     def __init__(self, parallel_config: ParallelConfig,
-                 cache_config: CacheConfig):
+                 cache_config: CacheConfig, schedule_config: SchedulerConfig):
         self.parallel_config = parallel_config
         self.cache_config = cache_config
+        self.scheduler_config = schedule_config
         self._initialized = False
         # modifying _app_aware_managers is not allowed after is_finalized=True
         self._app_aware_managers: Dict[str, AppAwareManager] = {}
@@ -111,9 +112,103 @@ class CustomBlockManager:
         assert self._initialized
         return self._kv_cache_config
 
+    def _compile_two_level(
+            self, group_result: GroupResult, available_num_elements: int,
+            dtype: ComponentType
+    ) -> Tuple[KVCacheConfig, KVCacheScheduleConfig]:
+        group_layer_mapping = {}  # {app_property -> [layer_id]}}
+        group_page_size = {}  # {app_property -> page_size_of_group}
+        layer_page_size = {}  # {layer_id -> page_size_of_layer}
+        for page_size, group_ids in group_result.items():
+            for app_property, layer_ids in group_ids.items():
+                assert app_property not in group_layer_mapping
+                group_layer_mapping[app_property] = layer_ids
+                group_page_size[app_property] = page_size * len(layer_ids)
+                for layer_id in layer_ids:
+                    layer_page_size[layer_id] = page_size
+
+        level0_page_size = math.lcm(*group_page_size.values())
+        num_pages = get_num_pages(available_num_elements, level0_page_size)
+
+        kv_cache_config = KVCacheConfig(buffer_size=num_pages *
+                                        level0_page_size,
+                                        buffer_dtype=dtype,
+                                        level0_page_size=level0_page_size,
+                                        components={},
+                                        block_table_sharing={})
+        kv_cache_schedule_config = KVCacheScheduleConfig(
+            prefix_cache_alignment={})
+        num_pages -= 1  # to avoid overflow due to start_bias
+
+        for app_property, layer_ids in group_layer_mapping.items():
+            group_id = app_property
+            kv_cache_config.block_table_sharing[group_id] = layer_ids
+            for idx_in_group, layer_id in enumerate(layer_ids):
+                kv_cache_config.components[layer_id] = KVPageType(
+                    start_bias=idx_in_group * layer_page_size[layer_id],
+                    num_elements=num_pages * level0_page_size,
+                    page_size=layer_page_size[layer_id],
+                )
+                if idx_in_group == 0:
+                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
+                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
+        print("num_pages", num_pages)
+        print("kv_cache_config", kv_cache_config)
+        print("kv_cache_schedule_config", kv_cache_schedule_config)
+        return kv_cache_config, kv_cache_schedule_config
+
+    def _compile_single_page_size(
+            self, group_result: GroupResult, available_num_elements: int,
+            dtype: ComponentType
+    ) -> Tuple[KVCacheConfig, KVCacheScheduleConfig]:
+        page_size = list(group_result.keys())[0]
+        groups = group_result[page_size]  # {app_property -> [layer_id]}
+        group_sizes = [len(layers) for layers in groups.values()]
+        if self.cache_config.enable_layer_grouping:
+            group_size_gcd = math.gcd(*group_sizes)
+        else:
+            group_size_gcd = 1
+        allocator_page_size = page_size * group_size_gcd
+        num_pages = get_num_pages(available_num_elements, allocator_page_size)
+
+        unique_id = UniqueID()
+
+        kv_cache_config = KVCacheConfig(buffer_size=num_pages *
+                                        allocator_page_size,
+                                        buffer_dtype=dtype,
+                                        level0_page_size=allocator_page_size,
+                                        components={},
+                                        block_table_sharing={})
+        kv_cache_schedule_config = KVCacheScheduleConfig(
+            prefix_cache_alignment={})
+        num_pages -= 1  # to avoid overflow due to start_bias
+
+        for app_property, layers in groups.items():
+            for i in range(0, len(layers), group_size_gcd):
+                group_id = unique_id.get_group_id(app_property)
+                kv_cache_config.block_table_sharing[group_id] = []
+                for idx_in_group, layer_id in enumerate(
+                        layers[i:i + group_size_gcd]):
+                    kv_cache_config.block_table_sharing[group_id].append(
+                        layer_id)
+                    kv_cache_config.components[layer_id] = KVPageType(
+                        start_bias=idx_in_group * page_size,
+                        num_elements=num_pages * allocator_page_size,
+                        page_size=page_size,
+                    )
+                layer_id = kv_cache_config.block_table_sharing[group_id][0]
+                if idx_in_group == 0:
+                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
+                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
+        print("num_pages", num_pages)
+        print("kv_cache_config", kv_cache_config)
+        print("kv_cache_schedule_config", kv_cache_schedule_config)
+        return kv_cache_config, kv_cache_schedule_config
+
     @require_kv_config_not_init
     def _compile_get_kv_cache_config(
-            self, available_gpu_memory: int) -> KVCacheConfig:
+        self, available_gpu_memory: int
+    ) -> Tuple[KVCacheConfig, KVCacheScheduleConfig]:
         dtype = assert_and_get_same_dtype(self._app_aware_managers.values())
         available_num_elements = available_gpu_memory // get_dtype_size(dtype)
         group_result: GroupResult = {}
@@ -126,57 +221,15 @@ class CustomBlockManager:
                 group_result[page_size][app_property] = []
             group_result[page_size][app_property].append(layer_id)
 
-        # only one page size
-        if len(group_result) == 1:
-            page_size = list(group_result.keys())[0]
-            groups = group_result[page_size]  # {app_property -> [layer_id]}
-            group_sizes = [len(layers) for layers in groups.values()]
-            if self.cache_config.enable_layer_grouping:
-                group_size_gcd = math.gcd(*group_sizes)
-            else:
-                group_size_gcd = 1
-            allocator_page_size = page_size * group_size_gcd
-            num_pages = get_num_pages(available_num_elements,
-                                      allocator_page_size)
-
-            unique_id = UniqueID()
-
-            kv_cache_config = KVCacheConfig(
-                buffer_size=num_pages * allocator_page_size,
-                buffer_dtype=dtype,
-                level0_page_size=allocator_page_size,
-                components={},
-                block_table_sharing={})
-            kv_cache_schedule_config = KVCacheScheduleConfig(
-                prefix_cache_alignment={})
-            num_pages -= 1  # to avoid overflow due to start_bias
-
-            for app_property, layers in groups.items():
-                for i in range(0, len(layers), group_size_gcd):
-                    group_id = unique_id.get_group_id(app_property)
-                    kv_cache_config.block_table_sharing[group_id] = []
-                    for idx_in_group, layer_id in enumerate(
-                            layers[i:i + group_size_gcd]):
-                        kv_cache_config.block_table_sharing[group_id].append(
-                            layer_id)
-                        kv_cache_config.components[layer_id] = KVPageType(
-                            start_bias=idx_in_group * page_size,
-                            num_elements=num_pages * allocator_page_size,
-                            page_size=page_size,
-                        )
-                    layer_id = kv_cache_config.block_table_sharing[group_id][0]
-                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
-                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
-            print("kv_cache_config", kv_cache_config)
-            print("kv_cache_schedule_config", kv_cache_schedule_config)
-            return kv_cache_config, kv_cache_schedule_config
-
-        raise NotImplementedError("too complex")
-        # # all page size have only one app_property, and the app_property is the same:
-        # # e.g., spec decode
-        # group_result_first = list(group_result.values())[0]
-        # if all(len(app_property) == 1 for app_property in group_result.values()) and \
-        #     all(app_property.keys() == group_result_first.keys() for app_property in group_result.values()):
+        assert self.scheduler_config.use_per_layer_block_manager
+        if self.scheduler_config.enable_two_level_page:
+            return self._compile_two_level(group_result,
+                                           available_num_elements, dtype)
+        else:
+            assert len(group_result) == 1
+            return self._compile_single_page_size(group_result,
+                                                  available_num_elements,
+                                                  dtype)
 
     @require_kv_config_not_init
     def add_app_aware_managers(self, managers: Dict[int, AppAwareManager]):

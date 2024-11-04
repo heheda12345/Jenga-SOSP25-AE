@@ -1977,7 +1977,8 @@ class LLMEngine:
 
     def get_custom_block_manager(self) -> CustomBlockManager:
         block_manager = CustomBlockManager(self.parallel_config,
-                                           self.cache_config)
+                                           self.cache_config,
+                                           self.scheduler_config)
         if self.speculative_config is None:
             block_manager.add_block_managers_of_model(self.model_config,
                                                       self.parallel_config)

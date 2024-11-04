@@ -152,7 +152,7 @@ class SelfAttentionManager(AppAwareManager):
         return self.block_size * self.memory_per_token
 
     def get_app_property(self) -> str:
-        return "self_attention"
+        return f"self_attention_{self.get_page_size()}"
 
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
@@ -252,7 +252,7 @@ class EncoderDecoderManager(AppAwareManager):
         return self.block_size * self.memory_per_token
 
     def get_app_property(self) -> str:
-        return "encoder_decoder"
+        return f"encoder_decoder_{self.get_page_size()}"
 
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
@@ -327,7 +327,7 @@ class SlidingWindowManager(AppAwareManager):
         return self.block_size * self.memory_per_token
 
     def get_app_property(self) -> str:
-        return f"sliding_window_{self.sliding_window_size}"
+        return f"sliding_window_{self.sliding_window_size}_{self.get_page_size()}"
 
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,

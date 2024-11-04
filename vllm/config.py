@@ -974,6 +974,7 @@ class SchedulerConfig:
                  max_model_len: int,
                  use_v2_block_manager: bool = True,
                  use_per_layer_block_manager: bool = False,
+                 enable_two_level_page: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -1025,6 +1026,7 @@ class SchedulerConfig:
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
         self.use_per_layer_block_manager = use_per_layer_block_manager
+        self.enable_two_level_page = enable_two_level_page
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
@@ -1069,6 +1071,11 @@ class SchedulerConfig:
             raise ValueError(
                 "Both use_v2_block_manager and use_per_layer_block_manager are set. "
                 "Only one can be used at a time.")
+
+        if not self.use_per_layer_block_manager and self.enable_two_level_page:
+            raise ValueError(
+                "Two level page is only supported with per layer block manager."
+            )
 
     @property
     def is_multi_step(self) -> bool:
@@ -1130,6 +1137,7 @@ class SpeculativeConfig:
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
         use_per_layer_block_manager: bool,
+        enable_two_level_page: bool,
         disable_log_stats: bool,
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
@@ -1225,6 +1233,11 @@ class SpeculativeConfig:
             raise ValueError(
                 "Speculative decoding requires usage of the V2 "
                 "block manager. Enable it with --use-v2-block-manager.")
+
+        if not use_per_layer_block_manager and enable_two_level_page:
+            raise ValueError(
+                "Two level page is only supported with per layer block manager."
+            )
 
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
@@ -1493,8 +1506,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method
-                != 'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "

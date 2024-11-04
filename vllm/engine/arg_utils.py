@@ -109,6 +109,7 @@ class EngineArgs:
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     use_per_layer_block_manager: bool = False  # TODO: use cleaner flag after v1 is deprecated
+    enable_two_level_page: bool = False
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     layer_grouping: bool = True
@@ -392,6 +393,9 @@ class EngineArgs:
             help=
             'Use PerlayerBlockSpaceManager. By default this is set to False. '
             'Set to True to use PerlayerBlockSpaceManager')
+        parser.add_argument('--enable-two-level-page',
+                            action='store_true',
+                            help='Enable two level page for block manager')
         parser.add_argument(
             '--layer-grouping',
             type=bool,
@@ -1009,6 +1013,7 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
             use_per_layer_block_manager=self.use_per_layer_block_manager,
+            enable_two_level_page=self.enable_two_level_page,
             disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
@@ -1043,6 +1048,7 @@ class EngineArgs:
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
             use_per_layer_block_manager=self.use_per_layer_block_manager,
+            enable_two_level_page=self.enable_two_level_page,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
