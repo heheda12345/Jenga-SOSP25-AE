@@ -173,7 +173,8 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
+    def ensure_num_empty_slots(self, num_empty_slots: int,
+                               seq_id: int) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -202,7 +203,8 @@ class BlockTable:
                 self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1],
                     device=device,
-                    group_id_hash=self._group_id_hash))
+                    group_id_hash=self._group_id_hash,
+                    seq_id=seq_id))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -299,8 +301,9 @@ class BlockTable:
                 self._allocator.allocate_immutable_blocks(
                     prev_block,
                     block_token_ids=block_token_ids,
-                    device=device,
-                    group_id_hash=self._group_id_hash))
+                    group_id_hash=self._group_id_hash,
+                    seq_id=self._seq_id,
+                    device=device))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -310,7 +313,8 @@ class BlockTable:
             block = self._allocator.allocate_mutable_block(
                 prev_block=prev_block,
                 device=device,
-                group_id_hash=self._group_id_hash)
+                group_id_hash=self._group_id_hash,
+                seq_id=self._seq_id)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)

@@ -3,15 +3,16 @@ from dataclasses import dataclass
 import math
 from typing import List, Optional, Dict, NewType, Tuple, Union
 
-from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVCacheScheduleConfig, KVCacheScheduleGroupConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block.common import BlockList
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import (
     Block,
     DeviceAwareBlockAllocator,
 )
+from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
-from vllm.core.block_v3.level0_block_allocator import Level0BlockAllocator
+from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
 from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
@@ -78,15 +79,10 @@ class UniqueID:
 
 
 @dataclass
-class KVCacheScheduleConfig:
-    prefix_cache_alignment: Dict[str, int]  # group_id -> alignment
-
-
-@dataclass
 class LastNumRequiredBlocksInfo:
     seq_id: int
-    num_lv1_block: Dict[str, int]  # group_id -> num_lv1_block
-    sum_min_lv0_block: int
+    num_large_blocks_min: Dict[str, int]  # group_id -> num_large_blocks_min
+    num_large_blocks_max: Dict[str, int]  # group_id -> num_large_blocks_max
 
 
 class CustomBlockManager:
@@ -103,17 +99,43 @@ class CustomBlockManager:
         self._kv_cache_config: Optional[KVCacheConfig] = None
         self._kv_cache_schedule_config: Optional[KVCacheScheduleConfig] = None
         self.last_num_required_blocks_info = LastNumRequiredBlocksInfo(
-            seq_id=-1, num_lv1_block={}, sum_min_lv0_block=0)
+            seq_id=-1, num_large_blocks_min={}, num_large_blocks_max={})
         self.global_block_allocator: Union[CpuGpuBlockAllocator,
-                                           Level0BlockAllocator] = None
+                                           LargeBlockIDAllocator] = None
 
     def init_allocator(self):
-        self.num_total_gpu_blocks = self.kv_cache_config.buffer_size // self.kv_cache_config.level0_page_size
+        kv_cache_config = self._kv_cache_config
+        kv_cache_schedule_config = self._kv_cache_schedule_config
+        self.num_total_gpu_blocks = kv_cache_schedule_config.num_level0_pages
         self.num_total_cpu_blocks = 0
 
         if self.scheduler_config.enable_two_level_page:
-            self.global_block_allocator = Level0BlockAllocator(
-                num_gpu_blocks=self.num_total_gpu_blocks)
+            self.global_block_allocator = LargeBlockIDAllocator(
+                num_blocks=self.num_total_gpu_blocks)
+            if self.cache_config.enable_prefix_caching:
+                raise NotImplementedError
+            else:
+                self.group_allocators = {}
+
+                for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
+                ):
+                    schedule_component = kv_cache_schedule_config.groups[
+                        group_id]
+                    component = kv_cache_config.components[layer_ids[0]]
+                    allocator = NaiveBlockAllocator(
+                        create_block=NaiveBlock,  # type: ignore
+                        num_blocks=self.num_total_gpu_blocks *
+                        schedule_component.large_small_ratio,
+                        block_size=schedule_component.block_size,
+                        block_ids=[],
+                        enable_two_level_page=True,
+                        two_level_kwargs={
+                            'large_small_ratio':
+                            schedule_component.large_small_ratio,
+                            'large_block_id_allocator':
+                            self.global_block_allocator,
+                        })
+                    self.group_allocators[group_id] = allocator
         else:
             self.global_block_allocator = CpuGpuBlockAllocator.create(
                 allocator_type="prefix_caching"
@@ -122,11 +144,13 @@ class CustomBlockManager:
                 num_cpu_blocks=self.num_total_cpu_blocks,
                 block_size=self.cache_config.block_size,
             )
+            self.group_allocators = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
-            self.global_block_allocator)
+            self.global_block_allocator
+        )  # same for all groups, dispatch group_ids inside
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
-            self.global_block_allocator)
+            self.global_block_allocator)  # same for all groups
 
         logger.info(
             "############### create PerlayerBlockSpaceManager, block_size: {}, page size: {}, num pages: {} ###############"
@@ -180,7 +204,7 @@ class CustomBlockManager:
                                         components={},
                                         block_table_sharing={})
         kv_cache_schedule_config = KVCacheScheduleConfig(
-            prefix_cache_alignment={})
+            groups={}, num_level0_pages=num_pages)
         num_pages -= 1  # to avoid overflow due to start_bias
 
         for app_property, layer_ids in group_layer_mapping.items():
@@ -193,8 +217,16 @@ class CustomBlockManager:
                     page_size=layer_page_size[layer_id],
                 )
                 if idx_in_group == 0:
-                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
-                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
+                    kv_cache_schedule_config.groups[
+                        group_id] = KVCacheScheduleGroupConfig(
+                            prefix_cache_alignment=self._app_aware_managers[
+                                layer_id].get_prefix_cache_alignment(),
+                            block_size=self._app_aware_managers[layer_id].
+                            get_block_size(),
+                            large_small_ratio=level0_page_size //
+                            group_page_size[app_property],
+                        )
+
         print("num_pages", num_pages)
         print("kv_cache_config", kv_cache_config)
         print("kv_cache_schedule_config", kv_cache_schedule_config)
@@ -222,8 +254,7 @@ class CustomBlockManager:
                                         level0_page_size=allocator_page_size,
                                         components={},
                                         block_table_sharing={})
-        kv_cache_schedule_config = KVCacheScheduleConfig(
-            prefix_cache_alignment={})
+        kv_cache_schedule_config = KVCacheScheduleConfig(groups={})
         num_pages -= 1  # to avoid overflow due to start_bias
 
         for app_property, layers in groups.items():
@@ -241,8 +272,13 @@ class CustomBlockManager:
                     )
                 layer_id = kv_cache_config.block_table_sharing[group_id][0]
                 if idx_in_group == 0:
-                    kv_cache_schedule_config.prefix_cache_alignment[group_id] = \
-                        self._app_aware_managers[layer_id].get_prefix_cache_alignment()
+                    kv_cache_schedule_config.groups[
+                        group_id] = KVCacheScheduleGroupConfig(
+                            prefix_cache_alignment=self._app_aware_managers[
+                                layer_id].get_prefix_cache_alignment(),
+                            block_size=self._app_aware_managers[layer_id].
+                            get_block_size(),
+                        )
         print("num_pages", num_pages)
         print("kv_cache_config", kv_cache_config)
         print("kv_cache_schedule_config", kv_cache_schedule_config)
@@ -292,6 +328,24 @@ class CustomBlockManager:
         })
 
     @require_kv_config_init
+    def get_num_required_block_small_to_large(
+            self, num_required_blocks: Dict[str, int]) -> int:
+        num_large_blocks_min: Dict[str, int] = {}
+        num_large_blocks_max: Dict[str, int] = {}
+        for group_id, num_required_small_blocks in num_required_blocks.items():
+            schedule_config = self._kv_cache_schedule_config.groups[group_id]
+            num_large_blocks_max[group_id] = math.ceil(
+                num_required_small_blocks / schedule_config.large_small_ratio)
+
+            num_new_small_blocks_min = num_required_small_blocks - self.group_allocators[
+                group_id]._block_id_allocator.num_free_small_blocks
+            num_new_small_blocks_min = max(num_new_small_blocks_min, 0)
+            num_large_blocks_min[group_id] = math.ceil(
+                num_new_small_blocks_min / schedule_config.large_small_ratio)
+
+        return num_large_blocks_min, num_large_blocks_max
+
+    @require_kv_config_init
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
@@ -304,7 +358,19 @@ class CustomBlockManager:
                 seq_group, num_lookahead_slots)
             num_required_blocks[group_id] = num_blocks
 
-        total_blocks = sum(num_required_blocks.values())
+        if self.scheduler_config.enable_two_level_page:
+            num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
+                num_required_blocks)
+            self.last_num_required_blocks_info = LastNumRequiredBlocksInfo(
+                seq_id=seq_group.seqs[0].seq_id,
+                num_large_blocks_min=num_large_blocks_min,
+                num_large_blocks_max=num_large_blocks_max,
+            )
+            print("last_num_required_blocks_info",
+                  self.last_num_required_blocks_info)
+            total_blocks = sum(num_large_blocks_max.values())
+        else:
+            total_blocks = sum(num_required_blocks.values())
         return total_blocks
 
     @require_kv_config_init
@@ -312,14 +378,50 @@ class CustomBlockManager:
                           seq_group: SequenceGroup) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
 
+        if self.scheduler_config.enable_two_level_page:
+            assert self.last_num_required_blocks_info.seq_id == seq_group.seqs[
+                0].seq_id
+            block_info = self.last_num_required_blocks_info
+            total_large_blocks_min = sum(
+                block_info.num_large_blocks_min.values())
+            total_large_blocks_max = sum(
+                block_info.num_large_blocks_max.values())
+            num_free_large_blocks = self.global_block_allocator.get_num_free_blocks(
+            )
+            print("total_min", total_large_blocks_min, "total_max",
+                  total_large_blocks_max, "num_free_large_blocks",
+                  num_free_large_blocks)
+            if num_free_large_blocks >= total_large_blocks_max:
+                new_large_block_quota = block_info.num_large_blocks_max
+            elif num_free_large_blocks >= total_large_blocks_min:
+                new_large_block_quota = block_info.num_large_blocks_min
+            else:
+                raise ValueError(
+                    "Not enough free large blocks for the sequence")
+        else:
+            new_large_block_quota = {
+                group_id: -1
+                for group_id in
+                self.kv_cache_config.block_table_sharing.keys()
+            }
+
         with (self.global_block_allocator._allocators[
                 Device.GPU].evictor.remove_by_mark_ctx()
               if self.cache_config.enable_prefix_caching else nullcontext()):
             for group_id in self.kv_cache_config.block_table_sharing.keys():
                 layer_ids = self.kv_cache_config.block_table_sharing[group_id]
                 manager = self._app_aware_managers[layer_ids[0]]
-                block = manager.allocate_sequence(seq_group,
-                                                  self.global_block_allocator,
+                if self.scheduler_config.enable_two_level_page:
+                    allocator = self.group_allocators[group_id]
+                    small_id_allocator = allocator._block_id_allocator
+                    small_id_allocator.set_new_large_block_quota(
+                        new_large_block_quota[group_id])
+                    small_id_allocator.add_new_seq(seq_group.seqs[0].seq_id)
+                    print("group_id", group_id, "new_large_block_quota",
+                          new_large_block_quota[group_id])
+                else:
+                    allocator = self.global_block_allocator
+                block = manager.allocate_sequence(seq_group, allocator,
                                                   group_id)
                 if block is not None:
                     block.set_block_id_multiplier(len(layer_ids))
@@ -390,9 +492,9 @@ class CustomBlockManager:
         hit_len = -1
         for left, right in intersect_hit_lens[::-1]:
             for j in range(right, left - 1, -1):
-                valid = all(j % alignment == 0
-                            for alignment in self._kv_cache_schedule_config.
-                            prefix_cache_alignment.values())
+                valid = all(
+                    j % g.alignment == 0
+                    for g in self._kv_cache_schedule_config.groups.values())
                 if valid:
                     hit_len = j
                     break
@@ -445,6 +547,9 @@ class CustomBlockManager:
         if self.cache_config.enable_prefix_caching:
             self._last_access_blocks_tracker.remove_seq(seq_id)
             self._computed_blocks_tracker.remove_seq(seq_id)
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            allocator = self.group_allocators[
+                group_id]._block_id_allocator.remove_seq(seq_id)
 
     @require_kv_config_init
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
@@ -459,7 +564,8 @@ class CustomBlockManager:
 
     @require_kv_config_init
     def mark_blocks_as_computed(self):
-        self.global_block_allocator.mark_blocks_as_computed([])
+        if self.cache_config.enable_prefix_caching:
+            self.global_block_allocator.mark_blocks_as_computed([])
 
     @require_kv_config_init
     def get_prefix_cache_hit_rate(self, device: Device) -> float:

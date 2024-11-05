@@ -77,6 +77,10 @@ class AppAwareManager:
             last_access_blocks_tracker: LastAccessBlocksTracker):
         raise NotImplementedError
 
+    @abstractmethod
+    def get_block_size(self) -> int:
+        return -1
+
 
 AppAwareAttnMetadataBuilder = AppAwareManager
 
@@ -112,7 +116,10 @@ def suffix_to_mutable_block(block_table: BlockTable,
             device = Device.GPU
             block_allocator.free(block)
             new_block = block_allocator.allocate_mutable_block(
-                block._prev_block, device, block._group_id_hash)
+                block._prev_block,
+                device=device,
+                group_id_hash=block._group_id_hash,
+                seq_id=block_table._seq_id)
             if next_block is not None:
                 next_block._prev_block = new_block
             next_block = new_block
@@ -236,6 +243,9 @@ class SelfAttentionManager(AppAwareManager):
             last_access_blocks_tracker: LastAccessBlocksTracker):
         pass
 
+    def get_block_size(self) -> int:
+        return self.block_size
+
 
 class EncoderDecoderManager(AppAwareManager):
 
@@ -300,6 +310,9 @@ class EncoderDecoderManager(AppAwareManager):
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
         pass
+
+    def get_block_size(self) -> int:
+        return self.block_size
 
 
 class SlidingWindowManager(AppAwareManager):
@@ -455,3 +468,6 @@ class SlidingWindowManager(AppAwareManager):
             last_access_blocks_tracker: LastAccessBlocksTracker):
         last_access_blocks_tracker.update_seq_blocks_last_access(
             seq.seq_id, block_table.physical_block_ids)
+
+    def get_block_size(self) -> int:
+        return self.block_size

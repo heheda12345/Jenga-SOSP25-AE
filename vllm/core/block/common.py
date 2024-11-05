@@ -76,6 +76,15 @@ class RefCounter(RefCounterProtocol):
     def as_readonly(self) -> "ReadOnlyRefCounter":
         return ReadOnlyRefCounter(self)
 
+    def add_new_blocks(self, new_block_indices: Iterable[BlockId]) -> None:
+        for index in new_block_indices:
+            assert index not in self._refcounts
+            self._refcounts[index] = 0
+
+    def remove_blocks(self, block_indices: Iterable[BlockId]) -> None:
+        for index in block_indices:
+            self._refcounts.pop(index)
+
 
 class ReadOnlyRefCounter(RefCounterProtocol):
     """A read-only view of the RefCounter class.

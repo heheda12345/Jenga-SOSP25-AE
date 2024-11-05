@@ -63,11 +63,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
+        enable_two_level_page: bool = False,
     ):
         if block_ids is None:
             block_ids = range(num_blocks)
 
         self._block_size = block_size
+        self.enable_two_level_page = enable_two_level_page
 
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
@@ -140,8 +142,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Optional[Device] = None,
-                                 group_id_hash: int = 0) -> Block:
+                                 group_id_hash: int,
+                                 seq_id: int,
+                                 device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
 
@@ -152,6 +155,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated immutable block.
         """
+        raise NotImplementedError("pass seq_id as argument")
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -179,25 +183,29 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(self,
-                                  prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Optional[Device] = None,
-                                  group_id_hash: int = 0) -> List[Block]:
+    def allocate_immutable_blocks(
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            group_id_hash: int,
+            seq_id: int,
+            device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
             prev_block = self.allocate_immutable_block(
                 prev_block=prev_block,
                 token_ids=token_ids,
-                device=device,
-                group_id_hash=group_id_hash)
+                group_id_hash=group_id_hash,
+                seq_id=seq_id,
+                device=device)
             blocks.append(prev_block)
         return blocks
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None,
-                               group_id_hash: int = 0) -> Block:
+                               group_id_hash: int,
+                               seq_id: int,
+                               device: Optional[Device] = None) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
         evict unused cached blocks.
 
@@ -208,6 +216,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated mutable block.
         """
+        raise NotImplementedError("pass seq_id")
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -303,10 +312,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         raise BlockAllocator.NoFreeBlocksError()
 
     def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
+        raise NotImplementedError("pass seq_id")
         try:
             # Allocate mutable block and extract its block_id
             block = self._hashless_allocator.allocate_mutable_block(
-                prev_block=None)
+                prev_block=None, seq_id=seq_id)
             block_id = block.block_id
             self._block_pool.free_block(block)
 
@@ -440,10 +450,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             int: The rzero-offset block id on certain device.
         """
+        raise NotImplementedError
         return sorted(self.all_block_ids).index(absolute_id)
 
     @property
     def all_block_ids(self) -> FrozenSet[int]:
+        if self.enable_two_level_page:
+            raise ValueError("should not reach here")
         return self._hashless_allocator.all_block_ids
 
     def get_prefix_cache_hit_rate(self) -> float:
@@ -654,6 +667,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Args:
             blocks: List of blocks to be swapped out.
         """
+        raise NotImplementedError
         for block in blocks:
             self._free_block_id(block)
 
@@ -665,6 +679,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Args:
             blocks: List of blocks to be swapped in.
         """
+        raise NotImplementedError
         for block in blocks:
             # Here we allocate either immutable or mutable block and then
             # extract its block_id. Note that the block object is released

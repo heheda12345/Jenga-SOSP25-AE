@@ -5,10 +5,7 @@ from typing import Tuple
 import msgspec
 
 from vllm.config import ModelConfig
-from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
 from vllm.core.block_v3.custom_block_manager import CustomBlockManager, CUSTOM_BLOCK_TABLE
-from vllm.core.block_v3.level0_block_allocator import Level0BlockAllocator
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager, PER_LAYER_BLOCK_IDS, ComputedBlock
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -56,6 +53,8 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
 
         seq_id = seq_group.seqs[0].seq_id
         self.block_tables[seq_id] = block_table
+        # print("block_table",
+        #       self.get_block_table_for_schedule(seq_group.seqs[0]))
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -128,6 +127,15 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         for block in self.block_tables[seq_id].values():
             block.free()
         del self.block_tables[seq_id]
+
+    def get_block_table_for_schedule(self,
+                                     seq: Sequence) -> PER_LAYER_BLOCK_IDS:
+        block_tables = self.block_tables[seq.seq_id]
+        block_ids = {
+            block_id: block_tables[block_id].physical_block_ids
+            for block_id in block_tables
+        }
+        return block_ids
 
     def get_block_table_for_exec(self, seq: Sequence) -> PER_LAYER_BLOCK_IDS:
         block_tables = self.block_tables[seq.seq_id]

@@ -1,9 +1,10 @@
 from collections import deque
-from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.core.block_v3.small_block_id_allocator import SmallBlockIDAllocator
 
 Refcount = int
 
@@ -18,7 +19,7 @@ class NaiveBlockAllocator(BlockAllocator):
             a prefix caching allocator -- the naive block allocator must
             construct prefix caching blocks (but shouldn't know anything else
             about them).
-        num_blocks (int): The total number of blocks to manage.
+        num_blocks (int): The total number of blocks to manage. For two level, this is the maximum number of small blocks.
         block_size (int): The size of each block in tokens.
         block_ids (Optional[Iterable[int]], optional): An optional iterable of
             block IDs. If not provided, block IDs will be assigned sequentially
@@ -32,17 +33,34 @@ class NaiveBlockAllocator(BlockAllocator):
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
         block_pool: Optional[BlockPool] = None,
+        enable_two_level_page: bool = False,
+        two_level_kwargs: Optional[dict] = None,
     ):
-        if block_ids is None:
-            block_ids = range(num_blocks)
+        print(
+            "create NaiveBlockAllocator",
+            create_block,
+            num_blocks,
+            block_size,
+            block_ids,
+            block_pool,
+        )
+        if not enable_two_level_page:
+            if block_ids is None:
+                block_ids = range(num_blocks)
 
-        self._free_block_indices: Deque[BlockId] = deque(block_ids)
-        self._all_block_indices = frozenset(block_ids)
-        assert len(self._all_block_indices) == num_blocks
+            self._free_block_indices: Deque[BlockId] = deque(block_ids)
+            self._all_block_indices: Set[BlockId] = frozenset(block_ids)
+            assert len(self._all_block_indices) == num_blocks
+            self._refcounter = RefCounter(
+                all_block_indices=self._free_block_indices)
+        else:
+            self._free_block_indices: Deque[
+                BlockId] = None  # to avoid access it
+            self._all_block_indices: Set[BlockId] = None  # to avoid access it
+            self._refcounter = RefCounter([])
 
-        self._refcounter = RefCounter(
-            all_block_indices=self._free_block_indices)
         self._block_size = block_size
+        self.enable_two_level_page = enable_two_level_page
 
         self._cow_tracker = CopyOnWriteTracker(
             refcounter=self._refcounter.as_readonly())
@@ -52,19 +70,27 @@ class NaiveBlockAllocator(BlockAllocator):
             # Pre-allocate "num_blocks * extra_factor" block objects.
             # The "* extra_factor" is a buffer to allow more block objects
             # than physical blocks
+            block_pool_size = num_blocks * extra_factor
             self._block_pool = BlockPool(self._block_size, create_block, self,
-                                         num_blocks * extra_factor)
+                                         block_pool_size)
         else:
             # In this case, the block pool is provided by the caller,
             # which means that there is most likely a need to share
             # a block pool between allocators
             self._block_pool = block_pool
 
+        if enable_two_level_page:
+            self._block_id_allocator = SmallBlockIDAllocator(
+                ref_counter=self._refcounter, **two_level_kwargs)
+        else:
+            self._block_id_allocator = None
+
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Optional[Device] = None,
-                                 group_id_hash: int = 0) -> Block:
+                                 group_id_hash: int,
+                                 seq_id: int,
+                                 device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
 
@@ -79,22 +105,25 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         assert device is None
         block = self.allocate_mutable_block(prev_block=prev_block,
-                                            group_id_hash=group_id_hash)
+                                            group_id_hash=group_id_hash,
+                                            seq_id=seq_id)
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(self,
-                                  prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Optional[Device] = None,
-                                  group_id_hash: int = 0) -> List[Block]:
-        assert device is None
+    def allocate_immutable_blocks(
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            group_id_hash: int,
+            seq_id: int,
+            device: Optional[Device] = None) -> List[Block]:
+        # assert device is None
         # we can ignore _group_id_hash in naive block allocator
         num_blocks = len(block_token_ids)
 
         block_ids = []
         for i in range(num_blocks):
-            block_ids.append(self._allocate_block_id())
+            block_ids.append(self._allocate_block_id(seq_id=seq_id))
 
         blocks = []
         for i in range(num_blocks):
@@ -110,8 +139,9 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None,
-                               group_id_hash: int = 0) -> Block:
+                               group_id_hash: int,
+                               seq_id: int,
+                               device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -122,9 +152,9 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        assert device is None
+        # assert device is None
         # we can ignore _group_id_hash in naive block allocator
-        block_id = self._allocate_block_id()
+        block_id = self._allocate_block_id(seq_id=seq_id)
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
                                             block_size=self._block_size,
@@ -132,11 +162,15 @@ class NaiveBlockAllocator(BlockAllocator):
                                             group_id_hash=group_id_hash)
         return block
 
-    def _allocate_block_id(self) -> BlockId:
-        if not self._free_block_indices:
-            raise BlockAllocator.NoFreeBlocksError()
+    def _allocate_block_id(self, seq_id: int) -> BlockId:
+        if self.enable_two_level_page:
+            block_id = self._block_id_allocator.allocate_block_id(
+                seq_id=seq_id)
+        else:
+            if not self._free_block_indices:
+                raise BlockAllocator.NoFreeBlocksError()
 
-        block_id = self._free_block_indices.popleft()
+            block_id = self._free_block_indices.popleft()
         self._refcounter.incr(block_id)
         return block_id
 
@@ -146,7 +180,10 @@ class NaiveBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            self._free_block_indices.appendleft(block_id)
+            if self.enable_two_level_page:
+                self._block_id_allocator.free_block_id(block_id)
+            else:
+                self._free_block_indices.appendleft(block_id)
 
         block.block_id = None
 
@@ -194,9 +231,13 @@ class NaiveBlockAllocator(BlockAllocator):
         return forked_blocks
 
     def get_num_free_blocks(self) -> int:
+        if self.enable_two_level_page:
+            raise ValueError("should not reach here")
         return len(self._free_block_indices)
 
     def get_num_total_blocks(self) -> int:
+        if self.enable_two_level_page:
+            raise ValueError("should not reach here")
         return len(self._all_block_indices)
 
     def get_physical_block_id(self, absolute_id: int) -> int:
@@ -210,6 +251,7 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             int: The zero-offset block id on certain device.
         """
+        raise NotImplementedError
         return sorted(self._all_block_indices).index(absolute_id)
 
     @property
@@ -218,6 +260,8 @@ class NaiveBlockAllocator(BlockAllocator):
 
     @property
     def all_block_ids(self) -> FrozenSet[int]:
+        if self.enable_two_level_page:
+            raise ValueError("should not reach here")
         return self._all_block_indices
 
     def cow_block_if_not_appendable(self, block: Block) -> BlockId:
@@ -312,10 +356,12 @@ class NaiveBlockAllocator(BlockAllocator):
         return len(old_block_set)
 
     def swap_out(self, blocks: List[Block]) -> None:
+        raise NotImplementedError
         for block in blocks:
             self._free_block_id(block)
 
     def swap_in(self, blocks: List[Block]) -> None:
+        raise NotImplementedError
         for block in blocks:
             # Here we allocate either immutable or mutable block and then
             # extract its block_id. Note that the block object is released

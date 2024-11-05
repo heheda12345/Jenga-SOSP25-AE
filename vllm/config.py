@@ -672,15 +672,17 @@ class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     block_table_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
 
 
-class SchedulerKVCacheConfig:
-    memory_config: dict[str, int]  # type_id -> memory_size
-    type_of_group: dict[str, str]  # group_id -> type_id
-    block_table_sharing: dict[str, list[str]]  # group_id -> List[layer_id]
+@dataclass
+class KVCacheScheduleGroupConfig:
+    block_size: int = 0
+    prefix_cache_alignment: int = 0
+    large_small_ratio: int = 0
 
 
 @dataclass
-class ManagerKVCacheConfig:
-    block_size: int
+class KVCacheScheduleConfig:
+    groups: Dict[str, KVCacheScheduleGroupConfig]  # group_id -> alignment
+    num_level0_pages: int
 
 
 @dataclass
