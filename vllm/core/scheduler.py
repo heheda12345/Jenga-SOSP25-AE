@@ -332,8 +332,6 @@ class Scheduler:
             assert custom_block_manager is not None
             assert BlockSpaceManagerImpl == PerlayerBlockSpaceManager
             self.block_manager = PerlayerBlockSpaceManager(
-                block_size=self.cache_config.block_size,
-                enable_caching=self.cache_config.enable_prefix_caching,
                 custom_block_manager=custom_block_manager)
         else:
             num_gpu_blocks = cache_config.num_gpu_blocks
@@ -1240,7 +1238,8 @@ class Scheduler:
             self.block_manager.free_skipped_blocks(seq_group.seqs[0])
         scheduler_outputs: SchedulerOutputs = self._schedule()
         scheduler_raw_end_time = time.perf_counter()
-        now = self.block_manager._last_access_blocks_tracker.next_time()
+        now = self.block_manager.custom_block_manager._last_access_blocks_tracker.next_time(
+        )
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1389,8 +1388,7 @@ class Scheduler:
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
         if self.scheduler_config.use_per_layer_block_manager and self.cache_config.enable_prefix_caching:
-            self.block_manager.global_block_allocator._allocators[
-                Device.GPU].evictor.confirm_all_remove()
+            self.block_manager.custom_block_manager.confirm_all_remove()
 
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently

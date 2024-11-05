@@ -1,15 +1,17 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Dict, NewType, Tuple
+from typing import List, Optional, Dict, NewType, Tuple, Union
 
 from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block.common import BlockList
+from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import (
     Block,
     DeviceAwareBlockAllocator,
 )
 from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
+from vllm.core.block_v3.level0_block_allocator import Level0BlockAllocator
 from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
@@ -80,6 +82,13 @@ class KVCacheScheduleConfig:
     prefix_cache_alignment: Dict[str, int]  # group_id -> alignment
 
 
+@dataclass
+class LastNumRequiredBlocksInfo:
+    seq_id: int
+    num_lv1_block: Dict[str, int]  # group_id -> num_lv1_block
+    sum_min_lv0_block: int
+
+
 class CustomBlockManager:
 
     def __init__(self, parallel_config: ParallelConfig,
@@ -93,6 +102,39 @@ class CustomBlockManager:
         # reading _kv_cache_config is not allowed before is_finalized=True
         self._kv_cache_config: Optional[KVCacheConfig] = None
         self._kv_cache_schedule_config: Optional[KVCacheScheduleConfig] = None
+        self.last_num_required_blocks_info = LastNumRequiredBlocksInfo(
+            seq_id=-1, num_lv1_block={}, sum_min_lv0_block=0)
+        self.global_block_allocator: Union[CpuGpuBlockAllocator,
+                                           Level0BlockAllocator] = None
+
+    def init_allocator(self):
+        self.num_total_gpu_blocks = self.kv_cache_config.buffer_size // self.kv_cache_config.level0_page_size
+        self.num_total_cpu_blocks = 0
+
+        if self.scheduler_config.enable_two_level_page:
+            self.global_block_allocator = Level0BlockAllocator(
+                num_gpu_blocks=self.num_total_gpu_blocks)
+        else:
+            self.global_block_allocator = CpuGpuBlockAllocator.create(
+                allocator_type="prefix_caching"
+                if self.cache_config.enable_prefix_caching else "naive",
+                num_gpu_blocks=self.num_total_gpu_blocks,
+                num_cpu_blocks=self.num_total_cpu_blocks,
+                block_size=self.cache_config.block_size,
+            )
+
+        self._computed_blocks_tracker = ComputedBlocksTracker(
+            self.global_block_allocator)
+        self._last_access_blocks_tracker = LastAccessBlocksTracker(
+            self.global_block_allocator)
+
+        logger.info(
+            "############### create PerlayerBlockSpaceManager, block_size: {}, page size: {}, num pages: {} ###############"
+            .format(
+                self.cache_config.block_size,
+                self.kv_cache_config.level0_page_size,
+                self.num_total_gpu_blocks,
+            ))
 
     @require_kv_config_not_init
     def compile(self, available_cpu_memory: int,
@@ -104,6 +146,7 @@ class CustomBlockManager:
         # to get the final KVCacheConfig.
         if available_gpu_memory > 0:
             self._initialized = True
+            self.init_allocator()
         return self._kv_cache_config
 
     @property
@@ -252,31 +295,40 @@ class CustomBlockManager:
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
-        total_blocks = 0
+        num_required_blocks: Dict[str,
+                                  int] = {}  # group_id -> num_required_blocks
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             num_blocks = manager.get_num_required_blocks(
                 seq_group, num_lookahead_slots)
-            total_blocks += num_blocks
+            num_required_blocks[group_id] = num_blocks
+
+        total_blocks = sum(num_required_blocks.values())
         return total_blocks
 
     @require_kv_config_init
-    def allocate_sequence(
-            self, seq_group: SequenceGroup,
-            allocator: DeviceAwareBlockAllocator) -> CUSTOM_BLOCK_TABLE:
+    def allocate_sequence(self,
+                          seq_group: SequenceGroup) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
 
-        with (allocator._allocators[Device.GPU].evictor.remove_by_mark_ctx()
+        with (self.global_block_allocator._allocators[
+                Device.GPU].evictor.remove_by_mark_ctx()
               if self.cache_config.enable_prefix_caching else nullcontext()):
             for group_id in self.kv_cache_config.block_table_sharing.keys():
                 layer_ids = self.kv_cache_config.block_table_sharing[group_id]
                 manager = self._app_aware_managers[layer_ids[0]]
-                block = manager.allocate_sequence(seq_group, allocator,
+                block = manager.allocate_sequence(seq_group,
+                                                  self.global_block_allocator,
                                                   group_id)
                 if block is not None:
                     block.set_block_id_multiplier(len(layer_ids))
                     block_table[group_id] = block
+
+        if self.cache_config.enable_prefix_caching:
+            seq_id = seq_group.seqs[0].seq_id
+            self._computed_blocks_tracker.add_seq(seq_id)
+            self._last_access_blocks_tracker.add_seq(seq_id)
         return block_table
 
     @require_kv_config_init
@@ -305,11 +357,10 @@ class CustomBlockManager:
 
     @require_kv_config_init
     def get_common_computed_block_ids(
-            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-            computed_blocks_tracker: ComputedBlocksTracker,
-            block_allocator: DeviceAwareBlockAllocator) -> ComputedBlock:
+            self, seq: Sequence,
+            block_table: CUSTOM_BLOCK_TABLE) -> ComputedBlock:
 
-        cached_computed_block = computed_blocks_tracker.get_cached_computed_block(
+        cached_computed_block = self._computed_blocks_tracker.get_cached_computed_block(
             seq.seq_id)
         if cached_computed_block is not None:
             return cached_computed_block
@@ -318,7 +369,7 @@ class CustomBlockManager:
         possible_hit_lens: Dict[str, List[Tuple[int, int]]] = {}
 
         for group_id in self.kv_cache_config.block_table_sharing.keys():
-            block_is_computed =  computed_blocks_tracker.\
+            block_is_computed =  self._computed_blocks_tracker.\
                 get_cached_block_is_computed(
                 seq.seq_id, group_id, block_table[group_id].physical_block_ids)
             manager = self._app_aware_managers[
@@ -359,31 +410,63 @@ class CustomBlockManager:
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
-                    hit_len, block_table[group_id], block_allocator)
+                    hit_len, block_table[group_id],
+                    self.global_block_allocator)
 
         computed_block = ComputedBlock(computed_blocks, hit_len)
-        computed_blocks_tracker.set_cached_compute_block(
+        self._computed_blocks_tracker.set_cached_compute_block(
             seq.seq_id, computed_block)
         return computed_block
 
     @require_kv_config_init
-    def update_seq_blocks_last_access(
-            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-            last_access_blocks_tracker: LastAccessBlocksTracker):
-        for group_id in self.kv_cache_config.block_table_sharing.keys():
-            manager = self._app_aware_managers[
-                self.kv_cache_config.block_table_sharing[group_id][0]]
-            assert group_id in block_table
-            manager.update_seq_blocks_last_access(seq, block_table[group_id],
-                                                  last_access_blocks_tracker)
+    def update_seq_blocks_last_access(self, seq: Sequence,
+                                      block_table: CUSTOM_BLOCK_TABLE):
+        if self.cache_config.enable_prefix_caching:
+            for group_id in self.kv_cache_config.block_table_sharing.keys():
+                manager = self._app_aware_managers[
+                    self.kv_cache_config.block_table_sharing[group_id][0]]
+                assert group_id in block_table
+                manager.update_seq_blocks_last_access(
+                    seq, block_table[group_id],
+                    self._last_access_blocks_tracker)
 
     @require_kv_config_init
-    def free_skipped_blocks(
-            self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
-            last_access_blocks_tracker: LastAccessBlocksTracker):
+    def free_skipped_blocks(self, seq: Sequence,
+                            block_table: CUSTOM_BLOCK_TABLE):
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
             manager.free_skipped_blocks(seq, block_table[group_id],
-                                        last_access_blocks_tracker)
+                                        self._last_access_blocks_tracker)
+
+    @require_kv_config_init
+    def trackers_free(self, seq_id: int):
+        if self.cache_config.enable_prefix_caching:
+            self._last_access_blocks_tracker.remove_seq(seq_id)
+            self._computed_blocks_tracker.remove_seq(seq_id)
+
+    @require_kv_config_init
+    def access_all_blocks_in_seq(self, seq: Sequence, now: float):
+        if self.cache_config.enable_prefix_caching:
+            # Record the latest access time for the sequence. The actual update
+            # of the block ids is deferred to the sequence free(..) call, since
+            # only during freeing of block ids, the blocks are actually added to
+            # the evictor (which is when the most updated time is required)
+            # (This avoids expensive calls to mark_blocks_as_accessed(..))
+            self._last_access_blocks_tracker.update_last_access(
+                seq.seq_id, now)
+
+    @require_kv_config_init
+    def mark_blocks_as_computed(self):
+        self.global_block_allocator.mark_blocks_as_computed([])
+
+    @require_kv_config_init
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        return self.global_block_allocator.get_prefix_cache_hit_rate(device)
+
+    @require_kv_config_init
+    def confirm_all_remove(self):
+        if self.cache_config.enable_prefix_caching:
+            self.global_block_allocator._allocators[
+                Device.GPU].evictor.confirm_all_remove()
