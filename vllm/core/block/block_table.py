@@ -173,8 +173,7 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int,
-                               seq_id: int) -> None:
+    def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -204,7 +203,7 @@ class BlockTable:
                     prev_block=self._blocks[-1],
                     device=device,
                     group_id_hash=self._group_id_hash,
-                    seq_id=seq_id))
+                    seq_id=self._seq_id))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the

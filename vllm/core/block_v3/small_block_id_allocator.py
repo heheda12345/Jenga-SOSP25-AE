@@ -2,9 +2,8 @@ from collections import OrderedDict
 from typing import Dict, List, Set, Tuple
 
 from vllm.core.block.common import RefCounter
+from vllm.core.block.null_block import NULL_BLOCK_SEQ_ID
 from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
-
-NULL_BLOCK_SEQ_ID = -10
 
 
 class SmallBlockIDAllocator:
@@ -31,6 +30,7 @@ class SmallBlockIDAllocator:
         self.ref_counter = ref_counter
         # large_block_id -> seq_id. Each page has a prefer seq_id, even when the seq is freed.
         self.large_block_to_seq_id: Dict[int, int] = {}
+        self.add_seq(NULL_BLOCK_SEQ_ID)
 
     class NoFreeLevel1BlocksError(ValueError):
         pass
@@ -104,8 +104,7 @@ class SmallBlockIDAllocator:
 
         prefer_seq_id = self.large_block_to_seq_id[lv0_block_id]
         if prefer_seq_id in self.free_block_id_with_prefer:
-            self.free_block_id_with_prefer[prefer_seq_id].update(
-                (block_id, None))
+            self.free_block_id_with_prefer[prefer_seq_id][block_id] = None
         else:
             self.free_block_id_no_prefer.add(block_id)
 
@@ -134,5 +133,5 @@ class SmallBlockIDAllocator:
         # we do not change large_block_to_seq_id mapping here, instead, we check it when free small blocks
         del self.free_block_id_with_prefer[seq_id]
 
-    def add_new_seq(self, seq_id: int):
+    def add_seq(self, seq_id: int):
         self.free_block_id_with_prefer[seq_id] = OrderedDict()

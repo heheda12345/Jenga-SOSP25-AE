@@ -3,8 +3,8 @@ from typing import Dict, FrozenSet, List, Optional, Tuple
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.core.block.null_block import NullBlock
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.core.block_v3.small_block_id_allocator import NULL_BLOCK_SEQ_ID
 from vllm.utils import Device
 
 
@@ -63,6 +63,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
+                allocator_type=allocator_type,
             )
 
             cpu_allocator: BlockAllocator = NaiveBlockAllocator(
@@ -70,18 +71,21 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
+                allocator_type=allocator_type,
             )
         elif allocator_type == "prefix_caching":
             gpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
+                allocator_type=allocator_type,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
+                allocator_type=allocator_type,
             )
         else:
             raise ValueError(f"Unknown allocator type {allocator_type=}")
@@ -114,13 +118,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self.allocator_type = allocator_type
 
     def allocate_or_get_null_block(self) -> Block:
-        if self._null_block is None:
-            self._null_block = NullBlock(
-                self.allocate_mutable_block(None,
-                                            Device.GPU,
-                                            group_id_hash=1,
-                                            seq_id=NULL_BLOCK_SEQ_ID))
-        return self._null_block
+        return self._allocators[Device.GPU].allocate_or_get_null_block()
 
     def allocate_mutable_block(self, prev_block: Optional[Block],
                                device: Device, group_id_hash: int,
@@ -188,9 +186,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             block (Block): The block to be freed.
         """
-        # Null block should never be freed
-        if isinstance(block, NullBlock):
-            return
+        # move to device aware block allocator
+        # # Null block should never be freed
+        # if isinstance(block, NullBlock):
+        #     return
         block_id = block.block_id
         assert block_id is not None
         allocator = self._block_ids_to_allocator[block_id]
@@ -352,69 +351,3 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
         return list(mapping.items())
-
-
-class NullBlock(Block):
-    """
-    Null blocks are used as a placeholders for KV cache blocks that have
-    been dropped due to sliding window.
-    This implementation just wraps an ordinary block and prevents it from
-    being modified. It also allows for testing if a block is NullBlock
-    via isinstance().
-    """
-
-    def __init__(self, proxy: Block):
-        super().__init__()
-        self._proxy = proxy
-
-    def append_token_ids(self, token_ids: List[BlockId]):
-        raise ValueError("null block should not be modified")
-
-    @property
-    def block_id(self):
-        return self._proxy.block_id
-
-    @block_id.setter
-    def block_id(self, value: Optional[BlockId]):
-        raise ValueError("null block should not be modified")
-
-    @property
-    def token_ids(self) -> List[BlockId]:
-        return self._proxy.token_ids
-
-    @property
-    def num_tokens_total(self) -> int:
-        raise NotImplementedError(
-            "num_tokens_total is not used for null block")
-
-    @property
-    def num_empty_slots(self) -> BlockId:
-        return self._proxy.num_empty_slots
-
-    @property
-    def is_full(self):
-        return self._proxy.is_full
-
-    @property
-    def prev_block(self):
-        return self._proxy.prev_block
-
-    @property
-    def computed(self):
-        return self._proxy.computed
-
-    @computed.setter
-    def computed(self, value):
-        self._proxy.computed = value
-
-    @property
-    def last_accessed(self) -> float:
-        return self._proxy.last_accessed
-
-    @last_accessed.setter
-    def last_accessed(self, last_accessed_ts: float):
-        self._proxy.last_accessed = last_accessed_ts
-
-    @property
-    def content_hash(self):
-        return self._proxy.content_hash

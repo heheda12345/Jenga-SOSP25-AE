@@ -134,7 +134,12 @@ class CustomBlockManager:
                             schedule_component.large_small_ratio,
                             'large_block_id_allocator':
                             self.global_block_allocator,
-                        })
+                        },
+                        allocator_type="naive")
+                    # TODO: only allocate null block when needed
+                    allocator._block_id_allocator.set_new_large_block_quota(1)
+                    allocator.allocate_or_get_null_block()
+                    allocator._block_id_allocator.set_new_large_block_quota(0)
                     self.group_allocators[group_id] = allocator
         else:
             self.global_block_allocator = CpuGpuBlockAllocator.create(
@@ -203,9 +208,9 @@ class CustomBlockManager:
                                         level0_page_size=level0_page_size,
                                         components={},
                                         block_table_sharing={})
+        num_pages -= 1  # to avoid overflow due to start_bias
         kv_cache_schedule_config = KVCacheScheduleConfig(
             groups={}, num_level0_pages=num_pages)
-        num_pages -= 1  # to avoid overflow due to start_bias
 
         for app_property, layer_ids in group_layer_mapping.items():
             group_id = app_property
@@ -254,8 +259,9 @@ class CustomBlockManager:
                                         level0_page_size=allocator_page_size,
                                         components={},
                                         block_table_sharing={})
-        kv_cache_schedule_config = KVCacheScheduleConfig(groups={})
         num_pages -= 1  # to avoid overflow due to start_bias
+        kv_cache_schedule_config = KVCacheScheduleConfig(
+            groups={}, num_level0_pages=num_pages)
 
         for app_property, layers in groups.items():
             for i in range(0, len(layers), group_size_gcd):
@@ -329,11 +335,13 @@ class CustomBlockManager:
 
     @require_kv_config_init
     def get_num_required_block_small_to_large(
-            self, num_required_blocks: Dict[str, int]) -> int:
+            self, num_required_blocks: Dict[str, int],
+            seq_id: int) -> Tuple[Dict[str, int], Dict[str, int]]:
         num_large_blocks_min: Dict[str, int] = {}
         num_large_blocks_max: Dict[str, int] = {}
         for group_id, num_required_small_blocks in num_required_blocks.items():
             schedule_config = self._kv_cache_schedule_config.groups[group_id]
+            # TODO: more precise calculation for append_slots
             num_large_blocks_max[group_id] = math.ceil(
                 num_required_small_blocks / schedule_config.large_small_ratio)
 
@@ -343,7 +351,31 @@ class CustomBlockManager:
             num_large_blocks_min[group_id] = math.ceil(
                 num_new_small_blocks_min / schedule_config.large_small_ratio)
 
+        self.last_num_required_blocks_info = LastNumRequiredBlocksInfo(
+            seq_id=seq_id,
+            num_large_blocks_min=num_large_blocks_min,
+            num_large_blocks_max=num_large_blocks_max,
+        )
         return num_large_blocks_min, num_large_blocks_max
+
+    def set_large_block_quota(self, seq_id: int):
+        assert self.last_num_required_blocks_info.seq_id == seq_id
+        block_info = self.last_num_required_blocks_info
+        total_large_blocks_min = sum(block_info.num_large_blocks_min.values())
+        total_large_blocks_max = sum(block_info.num_large_blocks_max.values())
+        num_free_large_blocks = self.global_block_allocator.get_num_free_blocks(
+        )
+        if num_free_large_blocks >= total_large_blocks_max:
+            new_large_block_quota = block_info.num_large_blocks_max
+        elif num_free_large_blocks >= total_large_blocks_min:
+            new_large_block_quota = block_info.num_large_blocks_min
+        else:
+            raise ValueError("Not enough free large blocks for the sequence")
+
+        for group_id in self.kv_cache_config.block_table_sharing.keys():
+            allocator = self.group_allocators[group_id]
+            allocator._block_id_allocator.set_new_large_block_quota(
+                new_large_block_quota[group_id])
 
     @require_kv_config_init
     def get_num_required_blocks(self,
@@ -360,15 +392,8 @@ class CustomBlockManager:
 
         if self.scheduler_config.enable_two_level_page:
             num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
-                num_required_blocks)
-            self.last_num_required_blocks_info = LastNumRequiredBlocksInfo(
-                seq_id=seq_group.seqs[0].seq_id,
-                num_large_blocks_min=num_large_blocks_min,
-                num_large_blocks_max=num_large_blocks_max,
-            )
-            print("last_num_required_blocks_info",
-                  self.last_num_required_blocks_info)
-            total_blocks = sum(num_large_blocks_max.values())
+                num_required_blocks, seq_group.seqs[0].seq_id)
+            total_blocks = sum(num_large_blocks_min.values())
         else:
             total_blocks = sum(num_required_blocks.values())
         return total_blocks
@@ -377,33 +402,12 @@ class CustomBlockManager:
     def allocate_sequence(self,
                           seq_group: SequenceGroup) -> CUSTOM_BLOCK_TABLE:
         block_table: CUSTOM_BLOCK_TABLE = {}
+        seq_id = seq_group.seqs[0].seq_id
 
         if self.scheduler_config.enable_two_level_page:
-            assert self.last_num_required_blocks_info.seq_id == seq_group.seqs[
-                0].seq_id
-            block_info = self.last_num_required_blocks_info
-            total_large_blocks_min = sum(
-                block_info.num_large_blocks_min.values())
-            total_large_blocks_max = sum(
-                block_info.num_large_blocks_max.values())
-            num_free_large_blocks = self.global_block_allocator.get_num_free_blocks(
-            )
-            print("total_min", total_large_blocks_min, "total_max",
-                  total_large_blocks_max, "num_free_large_blocks",
-                  num_free_large_blocks)
-            if num_free_large_blocks >= total_large_blocks_max:
-                new_large_block_quota = block_info.num_large_blocks_max
-            elif num_free_large_blocks >= total_large_blocks_min:
-                new_large_block_quota = block_info.num_large_blocks_min
-            else:
-                raise ValueError(
-                    "Not enough free large blocks for the sequence")
-        else:
-            new_large_block_quota = {
-                group_id: -1
-                for group_id in
-                self.kv_cache_config.block_table_sharing.keys()
-            }
+            self.set_large_block_quota(seq_id)
+            for group_allocator in self.group_allocators.values():
+                group_allocator._block_id_allocator.add_seq(seq_id)
 
         with (self.global_block_allocator._allocators[
                 Device.GPU].evictor.remove_by_mark_ctx()
@@ -413,12 +417,6 @@ class CustomBlockManager:
                 manager = self._app_aware_managers[layer_ids[0]]
                 if self.scheduler_config.enable_two_level_page:
                     allocator = self.group_allocators[group_id]
-                    small_id_allocator = allocator._block_id_allocator
-                    small_id_allocator.set_new_large_block_quota(
-                        new_large_block_quota[group_id])
-                    small_id_allocator.add_new_seq(seq_group.seqs[0].seq_id)
-                    print("group_id", group_id, "new_large_block_quota",
-                          new_large_block_quota[group_id])
                 else:
                     allocator = self.global_block_allocator
                 block = manager.allocate_sequence(seq_group, allocator,
@@ -428,7 +426,6 @@ class CustomBlockManager:
                     block_table[group_id] = block
 
         if self.cache_config.enable_prefix_caching:
-            seq_id = seq_group.seqs[0].seq_id
             self._computed_blocks_tracker.add_seq(seq_id)
             self._last_access_blocks_tracker.add_seq(seq_id)
         return block_table
@@ -437,19 +434,29 @@ class CustomBlockManager:
     def get_num_blocks_touched_by_append_slots(
             self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
             num_lookahead_slots: int) -> int:
-        total_blocks = 0
+        num_required_blocks: Dict[str,
+                                  int] = {}  # group_id -> num_required_blocks
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
             num_blocks = manager.get_num_blocks_touched_by_append_slots(
                 seq, block_table[group_id], num_lookahead_slots)
-            total_blocks += num_blocks
+            num_required_blocks[group_id] = num_blocks
+
+        if self.scheduler_config.enable_two_level_page:
+            num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
+                num_required_blocks, seq.seq_id)
+            total_blocks = sum(num_large_blocks_min.values())
+        else:
+            total_blocks = sum(num_required_blocks.values())
         return total_blocks
 
     @require_kv_config_init
     def append_token_ids(self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
                          num_lookahead_slots: int) -> int:
+        if self.scheduler_config.enable_two_level_page:
+            self.set_large_block_quota(seq.seq_id)
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
@@ -547,9 +554,8 @@ class CustomBlockManager:
         if self.cache_config.enable_prefix_caching:
             self._last_access_blocks_tracker.remove_seq(seq_id)
             self._computed_blocks_tracker.remove_seq(seq_id)
-        for group_id in self.kv_cache_config.block_table_sharing.keys():
-            allocator = self.group_allocators[
-                group_id]._block_id_allocator.remove_seq(seq_id)
+        for group_allocator in self.group_allocators.values():
+            group_allocator._block_id_allocator.remove_seq(seq_id)
 
     @require_kv_config_init
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):

@@ -7,6 +7,7 @@ from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
+from vllm.core.block.null_block import NullBlock
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import ComputedBlock
 
@@ -388,6 +389,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def free(self, block: Block, keep_block_object: bool = False) -> None:
         """Release the block (look at free_block_id(..) docs)
         """
+        # Null block should never be freed
+        if isinstance(block, NullBlock):
+            return
+
         # Release the physical block index
         self._free_block_id(block)
 

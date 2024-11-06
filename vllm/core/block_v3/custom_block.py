@@ -334,7 +334,6 @@ class SlidingWindowManager(AppAwareManager):
         # For example, if sliding_window is 3 and block_size is 4,
         # we may need 2 blocks when the second block only holds 1 token.
         self.max_block_sliding_window = num_blocks + 1
-        print("max_block_sliding_window", self.max_block_sliding_window)
 
     def get_page_size(self):
         return self.block_size * self.memory_per_token

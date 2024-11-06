@@ -88,6 +88,7 @@ def run_vllm(
     num_scheduler_steps: int = 1,
     use_v2_block_manager: bool = False,
     use_per_layer_block_manager: bool = False,
+    enable_two_level_page: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
@@ -127,6 +128,7 @@ def run_vllm(
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
         use_per_layer_block_manager=use_per_layer_block_manager,
+        enable_two_level_page=enable_two_level_page,
         disable_async_output_proc=disable_async_output_proc,
         **llm_args,
     )
@@ -384,7 +386,8 @@ def main(args: argparse.Namespace):
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
             args.use_v2_block_manager, args.use_per_layer_block_manager,
-            args.download_dir, args.load_format, args.disable_async_output_proc
+            args.enable_two_level_page, args.download_dir, args.load_format,
+            args.disable_async_output_proc
         ]
 
         if args.async_engine:
@@ -519,6 +522,9 @@ if __name__ == "__main__":
     parser.add_argument("--use-per-layer-block-manager",
                         action='store_true',
                         help="Enable per layer block manager.")
+    parser.add_argument("--enable-two-level-page",
+                        action='store_true',
+                        help="Enable two level page for vLLM backend.")
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',

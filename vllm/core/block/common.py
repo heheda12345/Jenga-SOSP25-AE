@@ -83,6 +83,7 @@ class RefCounter(RefCounterProtocol):
 
     def remove_blocks(self, block_indices: Iterable[BlockId]) -> None:
         for index in block_indices:
+            assert self._refcounts[index] == 0
             self._refcounts.pop(index)
 
 

@@ -22,3 +22,6 @@ class LargeBlockIDAllocator:
 
     def free_block_id(self, block_id):
         self.free_block_ids.append(block_id)
+
+    def clear_copy_on_writes(self):
+        return []

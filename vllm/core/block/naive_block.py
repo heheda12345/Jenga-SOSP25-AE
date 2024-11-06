@@ -4,6 +4,7 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Set, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.core.block.null_block import NULL_BLOCK_SEQ_ID, NullBlock
 from vllm.core.block_v3.small_block_id_allocator import SmallBlockIDAllocator
 
 Refcount = int
@@ -35,6 +36,7 @@ class NaiveBlockAllocator(BlockAllocator):
         block_pool: Optional[BlockPool] = None,
         enable_two_level_page: bool = False,
         two_level_kwargs: Optional[dict] = None,
+        allocator_type: str = "naive",
     ):
         print(
             "create NaiveBlockAllocator",
@@ -61,6 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         self._block_size = block_size
         self.enable_two_level_page = enable_two_level_page
+        self.allocator_type = allocator_type
 
         self._cow_tracker = CopyOnWriteTracker(
             refcounter=self._refcounter.as_readonly())
@@ -84,6 +87,8 @@ class NaiveBlockAllocator(BlockAllocator):
                 ref_counter=self._refcounter, **two_level_kwargs)
         else:
             self._block_id_allocator = None
+
+        self._null_block: Optional[Block] = None
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
@@ -188,6 +193,10 @@ class NaiveBlockAllocator(BlockAllocator):
         block.block_id = None
 
     def free(self, block: Block, keep_block_object: bool = False) -> None:
+        # Null block should never be freed
+        if isinstance(block, NullBlock):
+            return
+
         # Release the physical block id
         self._free_block_id(block)
 
@@ -383,6 +392,20 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+
+    def allocate_or_get_null_block(self) -> Block:
+        """
+        Null blocks are used as a placeholders for KV cache blocks that have
+        been dropped due to sliding window.
+        There is at most one null block per allocator.
+        """
+        if self._null_block is None:
+            self._null_block = NullBlock(
+                self.allocate_mutable_block(None,
+                                            device=Device.GPU,
+                                            group_id_hash=1,
+                                            seq_id=NULL_BLOCK_SEQ_ID))
+        return self._null_block
 
 
 class NaiveBlock(Block):
