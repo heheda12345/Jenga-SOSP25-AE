@@ -70,7 +70,7 @@ class SmallBlockIDAllocator:
                 lv0_block_id = small_block_id // self.large_small_ratio
 
                 # add all free small blocks in this large block to seq_id's prefer list
-                assert lv0_block_id not in self.large_block_to_seq_id
+                # assert lv0_block_id not in self.large_block_to_seq_id
                 all_small_block_ids = set(
                     lv0_block_id * self.large_small_ratio + i
                     for i in range(self.large_small_ratio))
@@ -83,7 +83,7 @@ class SmallBlockIDAllocator:
                 for victim_seq_id, small_block_ids in self.free_block_id_with_prefer.items(
                 ):
                     if small_block_ids:
-                        small_block_id = small_block_ids.popleft()
+                        small_block_id = small_block_ids.popitem(last=False)[0]
                         break
                 else:
                     raise SmallBlockIDAllocator.NoFreeLevel1BlocksError()

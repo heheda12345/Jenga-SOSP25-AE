@@ -1,4 +1,5 @@
 from collections import deque
+from typing import Optional
 
 from vllm.utils import Device
 
@@ -25,3 +26,7 @@ class LargeBlockIDAllocator:
 
     def clear_copy_on_writes(self):
         return []
+
+    def get_prefix_cache_hit_rate(self,
+                                  device: Optional[Device] = None) -> float:
+        return -1
