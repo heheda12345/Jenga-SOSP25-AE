@@ -52,15 +52,12 @@ class CacheEngine:
         self.use_per_layer_attn_metadata = use_per_layer_attn_metadata
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(
-            model_config.get_num_attention_heads(parallel_config),
-            self.head_size,
-            self.num_kv_heads,
-            model_config.get_sliding_window(),
-            model_config.dtype,
-            cache_config.cache_dtype,
-            self.block_size,
-        )
+        self.attn_backend = get_attn_backend(self.head_size,
+                                             model_config.get_sliding_window(),
+                                             model_config.dtype,
+                                             cache_config.cache_dtype,
+                                             self.block_size,
+                                             model_config.is_attention_free)
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
@@ -145,13 +142,12 @@ class CacheEngineV3:
         # Get attention backend.
         assert model_config.dtype == kv_cache_config.buffer_dtype
         self.attn_backend = get_attn_backend(
-            model_config.get_num_attention_heads(parallel_config),
             model_config.get_head_size(),
-            model_config.get_num_kv_heads(parallel_config),
             model_config.get_sliding_window(),
             model_config.dtype,
             TORCH_DTYPE_TO_STR_DTYPE[kv_cache_config.buffer_dtype],
             self.block_size,
+            False,
         )
 
         if cache_config.cache_dtype == "auto":

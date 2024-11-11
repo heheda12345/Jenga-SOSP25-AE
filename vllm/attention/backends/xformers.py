@@ -131,11 +131,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int] = None
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int] = None
 
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
@@ -614,12 +611,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             else:
                 num_encoder_tokens = attn_metadata.num_prefill_tokens
             num_decode_tokens = attn_metadata.num_decode_tokens
-
-        if attn_type == AttentionType.DECODER:
-            # Only enforce this shape-constraint for decoder
-            # self-attention
-            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.

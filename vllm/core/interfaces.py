@@ -51,10 +51,10 @@ class BlockSpaceManager(ABC):
             from vllm.core.per_layer_block_manager import PerlayerBlockSpaceManager
             return PerlayerBlockSpaceManager
 
-        if version == "embedding":
-            from vllm.core.embedding_model_block_manager import (
-                EmbeddingModelBlockSpaceManager)
-            return EmbeddingModelBlockSpaceManager
+        if version == "placeholder":
+            from vllm.core.placeholder_block_space_manager import (
+                PlaceholderBlockSpaceManager)
+            return PlaceholderBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")
 
