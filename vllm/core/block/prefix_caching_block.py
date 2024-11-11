@@ -7,7 +7,8 @@ from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
-from vllm.core.block.null_block import NullBlock
+from vllm.core.block.null_block import NULL_BLOCK_SEQ_ID, NullBlock
+from vllm.core.block_v3.small_block_id_allocator import SmallBlockIDAllocator
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import ComputedBlock
 
@@ -62,12 +63,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self,
         num_blocks: int,
         block_size: int,
-        block_ids: Optional[Iterable[int]] = None,
+        owned_block_ids: Optional[Iterable[int]] = None,
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
         enable_two_level_page: bool = False,
+        two_level_kwargs: Optional[dict] = None,
+        allocator_type: str = "prefix_caching",
     ):
-        if block_ids is None:
-            block_ids = range(num_blocks)
+        print(
+            "create PrefixCachingBlockAllocator",
+            num_blocks,
+            block_size,
+            owned_block_ids,
+        )
+        if owned_block_ids is None:
+            owned_block_ids = range(num_blocks)
+        all_possible_block_ids = range(num_blocks)
 
         self._block_size = block_size
         self.enable_two_level_page = enable_two_level_page
@@ -80,10 +90,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # and should be marked as computed after an entire batch of sequences
         # are scheduled.
         self._touched_blocks: Set[BlockId] = set()
+        self.allocator_type = allocator_type
 
         # Used to track status of each physical block id
         self._block_tracker: Dict[BlockId, BlockTracker] = {}
-        for block_id in block_ids:
+        for block_id in all_possible_block_ids:
             self._block_tracker[block_id] = BlockTracker()
 
         # Pre-allocate "num_blocks * extra_factor" block objects.
@@ -98,9 +109,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
             block_size=block_size,
-            block_ids=block_ids,
+            block_ids=owned_block_ids,
             block_pool=self._block_pool,  # Share block pool here
+            enable_two_level_page=enable_two_level_page,
+            two_level_kwargs=two_level_kwargs,
         )
+
+        self._null_block: Optional[NullBlock] = None
 
         # Evitor used to maintain how we want to handle those computed blocks
         # if we find memory pressure is high.
@@ -156,8 +171,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated immutable block.
         """
-        raise NotImplementedError("pass seq_id as argument")
-        assert device is None
+        # assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
         # First, try to create a block that points to cached data
@@ -180,7 +194,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block,
-                                            group_id_hash=group_id_hash)
+                                            group_id_hash=group_id_hash,
+                                            seq_id=seq_id)
         block.append_token_ids(token_ids)
         return block
 
@@ -217,11 +232,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated mutable block.
         """
-        raise NotImplementedError("pass seq_id")
-        assert device is None
+        # assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
-        block_id = self._allocate_block_id()
+        block_id = self._allocate_block_id(seq_id=seq_id)
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
                                             block_size=self._block_size,
@@ -297,24 +311,29 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # itself (will be handled by the caller)
         self._hashless_allocator.free(block, keep_block_object=True)
 
-    def _allocate_block_id(self) -> BlockId:
+    def _allocate_block_id(self, seq_id: int) -> BlockId:
         """First tries to allocate a block id from the hashless allocator,
         and if there are no blocks, then tries to evict an unused cached block.
         """
-        hashless_block_id = self._maybe_allocate_hashless_block_id()
+        hashless_block_id = self._maybe_allocate_hashless_block_id(seq_id)
         if hashless_block_id is not None:
             return hashless_block_id
 
-        evicted_block_id = self._maybe_allocate_evicted_block_id()
+        if self.enable_two_level_page:
+            evicted_block_id = self._maybe_allocate_evicted_block_id_two_level(
+                seq_id)
+        else:
+            evicted_block_id = self._maybe_allocate_evicted_block_id(seq_id)
         if evicted_block_id is not None:
             return evicted_block_id
 
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
-    def _maybe_allocate_hashless_block_id(self) -> Optional[BlockId]:
-        raise NotImplementedError("pass seq_id")
+    def _maybe_allocate_hashless_block_id(self,
+                                          seq_id: int) -> Optional[BlockId]:
         try:
+            # TODO: high two-level allocation budget will lead to more evictions
             # Allocate mutable block and extract its block_id
             block = self._hashless_allocator.allocate_mutable_block(
                 prev_block=None, seq_id=seq_id)
@@ -326,7 +345,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         except BlockAllocator.NoFreeBlocksError:
             return None
 
-    def _maybe_allocate_evicted_block_id(self) -> Optional[BlockId]:
+    def _maybe_allocate_evicted_block_id(self,
+                                         seq_id: int) -> Optional[BlockId]:
         if self.evictor.num_blocks == 0:
             return None
 
@@ -336,6 +356,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # to remove it from _cached_blocks's tracking list
         block_id, content_hash_to_evict = self.evictor.evict()
 
+        self.remove_cached_block(block_id, content_hash_to_evict)
+
+        self._refcounter.incr(block_id)
+        self._track_block_id(block_id, computed=False)
+
+        return block_id
+
+    def _maybe_allocate_evicted_block_id_two_level(
+            self, seq_id: int) -> Optional[BlockId]:
+        raise NotImplementedError
+
+    def remove_cached_block(self, block_id: int,
+                            content_hash_to_evict: int) -> None:
         # Sanity checks
         assert content_hash_to_evict in self._cached_blocks
         _block_id = self._cached_blocks[content_hash_to_evict]
@@ -344,12 +377,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self._cached_blocks.pop(content_hash_to_evict)
 
-        self._refcounter.incr(block_id)
-        self._track_block_id(block_id, computed=False)
-
-        return block_id
-
-    def evict_block_id(self, block_id: int) -> None:
+    def evict_block_id(self, block_id: int) -> None:  # for testing only
         # Here we get an evicted block, which is only added
         # into evictor if its ref counter is 0
         # and since its content would be changed, we need
@@ -703,6 +731,28 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
             block.block_id = block_id  # Assign block_id
 
+    def allocate_or_get_null_block(self) -> Block:
+        if self._null_block is None:
+            self._null_block = NullBlock(
+                self.allocate_mutable_block(None,
+                                            device=Device.GPU,
+                                            group_id_hash=1,
+                                            seq_id=NULL_BLOCK_SEQ_ID))
+        return self._null_block
+
+    def get_num_free_small_blocks(self) -> int:
+        return self._hashless_allocator.get_num_free_small_blocks() + \
+            self.evictor.num_blocks
+
+    def set_new_large_block_quota(self, quota: int) -> None:
+        self._hashless_allocator.set_new_large_block_quota(quota)
+
+    def add_req_for_two_level_page(self, seq_id: int) -> None:
+        self._hashless_allocator.add_req_for_two_level_page(seq_id)
+
+    def remove_seq(self, seq_id: int) -> None:
+        self._hashless_allocator.remove_seq(seq_id)
+
 
 class PrefixCachingBlock(Block):
     """A block implementation that supports prefix caching.
@@ -938,10 +988,9 @@ class ComputedBlocksTracker:
         block id for caching purposes, to avoid caching of a full sequence
     """
 
-    def __init__(self, allocator):
+    def __init__(self, allocator, enable_two_level_page):
         self._allocator = allocator
-        self._cached_computed_seq_blocks: Dict[int, Tuple[List[int],
-                                                          bool]] = {}
+        self.enable_two_level_page = enable_two_level_page
         # seq_id => group_id => is_computed
         self._cached_is_computed: Dict[int, Dict[str, List[bool]]] = {}
         self._cached_computed_block: Dict[int, Optional[ComputedBlock]] = {}
@@ -949,16 +998,14 @@ class ComputedBlocksTracker:
     def add_seq(self, seq_id: int) -> None:
         """Start tracking seq_id
         """
-        assert seq_id not in self._cached_computed_seq_blocks
-        self._cached_computed_seq_blocks[seq_id] = ([], False)
+        assert seq_id not in self._cached_is_computed
         self._cached_is_computed[seq_id] = {}
         self._cached_computed_block[seq_id] = None
 
     def remove_seq(self, seq_id: int) -> None:
         """Stop tracking seq_id
         """
-        assert seq_id in self._cached_computed_seq_blocks
-        del self._cached_computed_seq_blocks[seq_id]
+        assert seq_id in self._cached_is_computed
         del self._cached_is_computed[seq_id]
         del self._cached_computed_block[seq_id]
 
@@ -1014,7 +1061,12 @@ class ComputedBlocksTracker:
         if group_id in self._cached_is_computed[seq_id]:
             return self._cached_is_computed[seq_id][group_id]
 
-        block_is_computed = self._allocator.get_blocks_is_computed(block_ids)
+        if self.enable_two_level_page:
+            block_is_computed = self._allocator[
+                group_id].get_blocks_is_computed(block_ids)
+        else:
+            block_is_computed = self._allocator.get_blocks_is_computed(
+                block_ids)
         block_is_computed[-1] = False  # Skip last block id
         self._cached_is_computed[seq_id][group_id] = block_is_computed
         return block_is_computed
@@ -1034,8 +1086,9 @@ class LastAccessBlocksTracker:
     an efficient update of allocator's block last access times
     """
 
-    def __init__(self, allocator):
+    def __init__(self, allocator, enable_two_level_page):
         self._allocator = allocator
+        self.enable_two_level_page = enable_two_level_page
         self._seq_last_access: Dict[int, Optional[float]] = {}
         self.now = 1000
 
@@ -1058,6 +1111,7 @@ class LastAccessBlocksTracker:
     def update_seq_blocks_last_access(self,
                                       seq_id: int,
                                       block_ids: List[int],
+                                      group_id: str,
                                       delta: int = 0) -> None:
         assert seq_id in self._seq_last_access
 
@@ -1067,9 +1121,13 @@ class LastAccessBlocksTracker:
             # No last access was recorded, no need to update.
             return
 
+        if self.enable_two_level_page:
+            allocator = self._allocator[group_id]
+        else:
+            allocator = self._allocator
+
         # seq_id / 100, so that the eviction will be centralized to one request
-        self._allocator.mark_blocks_as_accessed(block_ids,
-                                                ts + delta + seq_id / 100)
+        allocator.mark_blocks_as_accessed(block_ids, ts + delta + seq_id / 100)
 
     def next_time(self):
         self.now += 1

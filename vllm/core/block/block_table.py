@@ -152,7 +152,8 @@ class BlockTable:
                         self._seq_id, [
                             b.block_id for b in self._blocks[:end_block_idx]
                             if b is not null_block
-                        ])
+                        ],
+                        group_id=self._group_id)
             for idx in range(0, end_block_idx):
                 b = self._blocks[idx]
                 if b is not null_block:

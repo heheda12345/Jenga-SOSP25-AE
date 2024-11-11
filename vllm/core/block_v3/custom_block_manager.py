@@ -1,4 +1,4 @@
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 import math
 from typing import List, Optional, Dict, NewType, Tuple, Union
@@ -11,7 +11,7 @@ from vllm.core.block.interfaces import (
     DeviceAwareBlockAllocator,
 )
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
-from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker
+from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker, PrefixCachingBlockAllocator
 from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
 from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
@@ -109,11 +109,40 @@ class CustomBlockManager:
         self.num_total_gpu_blocks = kv_cache_schedule_config.num_level0_pages
         self.num_total_cpu_blocks = 0
 
+        for group_id, layer_ids in kv_cache_config.block_table_sharing.items():
+            for layer_id in layer_ids:
+                self._app_aware_managers[layer_id].attach_group_id(group_id)
+
         if self.scheduler_config.enable_two_level_page:
             self.global_block_allocator = LargeBlockIDAllocator(
                 num_blocks=self.num_total_gpu_blocks)
             if self.cache_config.enable_prefix_caching:
-                raise NotImplementedError
+                self.group_allocators = {}
+                for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
+                ):
+                    schedule_component = kv_cache_schedule_config.groups[
+                        group_id]
+                    allocator = PrefixCachingBlockAllocator(
+                        num_blocks=self.num_total_gpu_blocks *
+                        schedule_component.large_small_ratio,
+                        block_size=schedule_component.block_size,
+                        owned_block_ids=[],
+                        enable_two_level_page=True,
+                        two_level_kwargs={
+                            'large_small_ratio':
+                            schedule_component.large_small_ratio,
+                            'large_block_id_allocator':
+                            self.global_block_allocator,
+                        },
+                        allocator_type="prefix_caching",
+                    )
+                    # TODO: only allocate null block when needed
+                    allocator._hashless_allocator._block_id_allocator.set_new_large_block_quota(
+                        1)
+                    allocator.allocate_or_get_null_block()
+                    allocator._hashless_allocator._block_id_allocator.set_new_large_block_quota(
+                        0)
+                    self.group_allocators[group_id] = allocator
             else:
                 self.group_allocators = {}
 
@@ -121,7 +150,6 @@ class CustomBlockManager:
                 ):
                     schedule_component = kv_cache_schedule_config.groups[
                         group_id]
-                    component = kv_cache_config.components[layer_ids[0]]
                     allocator = NaiveBlockAllocator(
                         create_block=NaiveBlock,  # type: ignore
                         num_blocks=self.num_total_gpu_blocks *
@@ -151,11 +179,18 @@ class CustomBlockManager:
             )
             self.group_allocators = {}
 
-        self._computed_blocks_tracker = ComputedBlocksTracker(
-            self.global_block_allocator
-        )  # same for all groups, dispatch group_ids inside
-        self._last_access_blocks_tracker = LastAccessBlocksTracker(
-            self.global_block_allocator)  # same for all groups
+        if self.scheduler_config.enable_two_level_page:
+            self._computed_blocks_tracker = ComputedBlocksTracker(
+                self.group_allocators, enable_two_level_page=True)
+            self._last_access_blocks_tracker = LastAccessBlocksTracker(
+                self.group_allocators, enable_two_level_page=True)
+        else:
+            self._computed_blocks_tracker = ComputedBlocksTracker(
+                self.global_block_allocator, enable_two_level_page=False
+            )  # same for all groups, dispatch group_ids inside
+            self._last_access_blocks_tracker = LastAccessBlocksTracker(
+                self.global_block_allocator,
+                enable_two_level_page=False)  # same for all groups
 
         logger.info(
             "############### create PerlayerBlockSpaceManager, block_size: {}, page size: {}, num pages: {} ###############"
@@ -346,7 +381,7 @@ class CustomBlockManager:
                 num_required_small_blocks / schedule_config.large_small_ratio)
 
             num_new_small_blocks_min = num_required_small_blocks - self.group_allocators[
-                group_id]._block_id_allocator.num_free_small_blocks
+                group_id].get_num_free_small_blocks()
             num_new_small_blocks_min = max(num_new_small_blocks_min, 0)
             num_large_blocks_min[group_id] = math.ceil(
                 num_new_small_blocks_min / schedule_config.large_small_ratio)
@@ -374,7 +409,7 @@ class CustomBlockManager:
 
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             allocator = self.group_allocators[group_id]
-            allocator._block_id_allocator.set_new_large_block_quota(
+            allocator.set_new_large_block_quota(
                 new_large_block_quota[group_id])
 
     @require_kv_config_init
@@ -407,11 +442,18 @@ class CustomBlockManager:
         if self.scheduler_config.enable_two_level_page:
             self.set_large_block_quota(seq_id)
             for group_allocator in self.group_allocators.values():
-                group_allocator._block_id_allocator.add_seq(seq_id)
+                group_allocator.add_req_for_two_level_page(seq_id)
 
-        with (self.global_block_allocator._allocators[
-                Device.GPU].evictor.remove_by_mark_ctx()
-              if self.cache_config.enable_prefix_caching else nullcontext()):
+        with ExitStack() as ctx_stack:
+            if self.cache_config.enable_prefix_caching:
+                if self.scheduler_config.enable_two_level_page:
+                    for allocator in self.group_allocators.values():
+                        ctx_stack.enter_context(
+                            allocator.evictor.remove_by_mark_ctx())
+                else:
+                    ctx_stack.enter_context(
+                        self.global_block_allocator._allocators[
+                            Device.GPU].evictor.remove_by_mark_ctx())
             for group_id in self.kv_cache_config.block_table_sharing.keys():
                 layer_ids = self.kv_cache_config.block_table_sharing[group_id]
                 manager = self._app_aware_managers[layer_ids[0]]
@@ -487,11 +529,11 @@ class CustomBlockManager:
 
             possible_hit_lens[group_id] = manager.get_possible_hit_lens(
                 block_is_computed)
-            # print("possible_hit_lens",
-            #       group_id,
-            #       to_range(block_is_computed),
-            #       possible_hit_lens[group_id],
-            #       flush=True)
+            print("possible_hit_lens",
+                  group_id,
+                  to_range(block_is_computed),
+                  possible_hit_lens[group_id],
+                  flush=True)
 
         intersect_hit_lens = intersect_multiple_sets(
             possible_hit_lens.values())
@@ -500,14 +542,14 @@ class CustomBlockManager:
         for left, right in intersect_hit_lens[::-1]:
             for j in range(right, left - 1, -1):
                 valid = all(
-                    j % g.alignment == 0
+                    j % g.prefix_cache_alignment == 0
                     for g in self._kv_cache_schedule_config.groups.values())
                 if valid:
                     hit_len = j
                     break
             if hit_len != -1:
                 break
-        # print("hit_len", hit_len, flush=True)
+        print("hit_len", hit_len, flush=True)
 
         if hit_len == -1:
             hit_len = 0
@@ -517,10 +559,13 @@ class CustomBlockManager:
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
+            if self.scheduler_config.enable_two_level_page:
+                allocator = self.group_allocators[group_id]
+            else:
+                allocator = self.global_block_allocator
             computed_blocks[
                 group_id] = manager.filter_computed_blocks_by_token(
-                    hit_len, block_table[group_id],
-                    self.global_block_allocator)
+                    hit_len, block_table[group_id], allocator)
 
         computed_block = ComputedBlock(computed_blocks, hit_len)
         self._computed_blocks_tracker.set_cached_compute_block(
@@ -555,7 +600,7 @@ class CustomBlockManager:
             self._last_access_blocks_tracker.remove_seq(seq_id)
             self._computed_blocks_tracker.remove_seq(seq_id)
         for group_allocator in self.group_allocators.values():
-            group_allocator._block_id_allocator.remove_seq(seq_id)
+            group_allocator.remove_seq(seq_id)
 
     @require_kv_config_init
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
@@ -571,7 +616,11 @@ class CustomBlockManager:
     @require_kv_config_init
     def mark_blocks_as_computed(self):
         if self.cache_config.enable_prefix_caching:
-            self.global_block_allocator.mark_blocks_as_computed([])
+            if self.scheduler_config.enable_two_level_page:
+                for allocator in self.group_allocators.values():
+                    allocator.mark_blocks_as_computed([])
+            else:
+                self.global_block_allocator.mark_blocks_as_computed([])
 
     @require_kv_config_init
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
@@ -580,5 +629,9 @@ class CustomBlockManager:
     @require_kv_config_init
     def confirm_all_remove(self):
         if self.cache_config.enable_prefix_caching:
-            self.global_block_allocator._allocators[
-                Device.GPU].evictor.confirm_all_remove()
+            if self.scheduler_config.enable_two_level_page:
+                for allocator in self.group_allocators.values():
+                    allocator.evictor.confirm_all_remove()
+            else:
+                self.global_block_allocator._allocators[
+                    Device.GPU].evictor.confirm_all_remove()

@@ -681,7 +681,7 @@ class KVCacheScheduleGroupConfig:
 
 @dataclass
 class KVCacheScheduleConfig:
-    groups: Dict[str, KVCacheScheduleGroupConfig]  # group_id -> alignment
+    groups: Dict[str, KVCacheScheduleGroupConfig]  # group_id -> group_config
     num_level0_pages: int
 
 

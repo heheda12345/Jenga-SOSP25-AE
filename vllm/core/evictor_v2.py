@@ -206,3 +206,7 @@ def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
         return LRUEvictor()
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
+
+
+class TwoLevelLRUEvictor:
+    pass

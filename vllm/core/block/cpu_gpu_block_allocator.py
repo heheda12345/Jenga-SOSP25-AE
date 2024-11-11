@@ -77,14 +77,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             gpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
-                block_ids=gpu_block_ids,
+                owned_block_ids=gpu_block_ids,
                 allocator_type=allocator_type,
             )
 
             cpu_allocator = PrefixCachingBlockAllocator(
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
-                block_ids=cpu_block_ids,
+                owned_block_ids=cpu_block_ids,
                 allocator_type=allocator_type,
             )
         else:

@@ -19,12 +19,11 @@ class AppAwareManager:
         self.initialized = False
         assert isinstance(dtype, torch.dtype)
         self.dtype = dtype
+        self.group_id = ""
 
-    def init_kv_cache_config(self, kv_cache_config: KVCacheConfig):
-        assert not self.initialized, "KV cache config is already initialized"
-        # self.kv_cache_config = kv_cache_config
-        # TODO: can we remove this function?
-        self.initialized = True
+    def attach_group_id(self, group_id: str):
+        assert self.group_id == "", "group_id is already set"
+        self.group_id = group_id
 
     @abstractmethod
     def get_page_size(self) -> int:
@@ -236,7 +235,7 @@ class SelfAttentionManager(AppAwareManager):
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
         last_access_blocks_tracker.update_seq_blocks_last_access(
-            seq.seq_id, block_table.physical_block_ids)
+            seq.seq_id, block_table.physical_block_ids, self.group_id)
 
     def free_skipped_blocks(
             self, seq: Sequence, block_table: BlockTable,
@@ -422,7 +421,7 @@ class SlidingWindowManager(AppAwareManager):
                     b.block_id for b in
                     block_table._blocks[block_table.free_start:end_block_idx]
                     if b is not null_block
-                ], -200)
+                ], self.group_id, -200)
         for idx in range(block_table.free_start, end_block_idx):
             b = block_table._blocks[idx]
             if b is not null_block:
@@ -466,7 +465,7 @@ class SlidingWindowManager(AppAwareManager):
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
         last_access_blocks_tracker.update_seq_blocks_last_access(
-            seq.seq_id, block_table.physical_block_ids)
+            seq.seq_id, block_table.physical_block_ids, self.group_id)
 
     def get_block_size(self) -> int:
         return self.block_size

@@ -144,8 +144,8 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               group_id_hash: int,
                                seq_id: int,
+                               group_id_hash: int = 0,
                                device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
@@ -406,6 +406,21 @@ class NaiveBlockAllocator(BlockAllocator):
                                             group_id_hash=1,
                                             seq_id=NULL_BLOCK_SEQ_ID))
         return self._null_block
+
+    def get_num_free_small_blocks(self) -> int:
+        if self.enable_two_level_page:
+            return self._block_id_allocator.num_free_small_blocks
+        else:
+            raise ValueError("should not reach here")
+
+    def set_new_large_block_quota(self, quota: int) -> None:
+        self._block_id_allocator.set_new_large_block_quota(quota)
+
+    def add_req_for_two_level_page(self, seq_id: int) -> None:
+        self._block_id_allocator.add_seq(seq_id)
+
+    def remove_seq(self, seq_id: int) -> None:
+        self._block_id_allocator.remove_seq(seq_id)
 
 
 class NaiveBlock(Block):
