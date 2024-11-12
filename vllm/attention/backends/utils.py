@@ -53,7 +53,7 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
             "sliding window attention in V1 block manager")
         # When prefill, we use it to not write slots to kv cache
         # to save memory.
-        start_idx = max(0, query_len - sliding_window)
+        # start_idx = max(0, query_len - sliding_window)
     return start_idx
 
 

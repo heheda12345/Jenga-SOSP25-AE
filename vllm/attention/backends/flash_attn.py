@@ -15,7 +15,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            is_block_tables_empty)
 from vllm.core.block_v3.custom_block import SlidingWindowManager
 from vllm.forward_context import get_forward_context
-from vllm.utils import Timer, async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import Timer, async_tensor_h2d, check_tensor, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -705,6 +705,7 @@ def unified_flash_attention(
     query = query.view(-1, num_heads, head_size)
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
+    # print("slot_mapping", attn_metadata.slot_mapping)
 
     if key_cache.numel() > 0:
         # Reshape the input keys and values and store them in the cache.
@@ -740,6 +741,7 @@ def unified_flash_attention(
 
     prefill_output: Optional[torch.Tensor] = None
     decode_output: Optional[torch.Tensor] = None
+    # print("window size", window_size)
 
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
@@ -753,6 +755,10 @@ def unified_flash_attention(
             #     timer_self_prefill.start()
             # else:
             #     timer_window_prefill.start()
+            # if key_cache.numel() > 0:
+            #     check_tensor(query, f"pts/prefill_query_{layer_id}.pt")
+            #     check_tensor(key, f"pts/prefill_key_{layer_id}.pt")
+            #     check_tensor(value, f"pts/prefill_value_{layer_id}.pt")
             prefill_output = flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -767,6 +773,9 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             )
+            # if key_cache.numel() > 0:
+            #     check_tensor(prefill_output,
+            #                  f"pts/prefill_output_{layer_id}.pt")
             # torch.cuda.synchronize()
             # if window_size[0] == -1:
             #     t = timer_self_prefill.log()
@@ -836,6 +845,19 @@ def unified_flash_attention(
                 window_size=window_size,
             )
         else:
+            # check_tensor(decode_query.unsqueeze(1),
+            #              f"pts/decode_query_{layer_id}.pt")
+            # check_tensor(
+            #     key_cache[decode_meta.block_tables].flatten(
+            #         0, 2)[:decode_meta.seq_lens_tensor],
+            #     f"pts/key_cache_{layer_id}.pt")
+            # check_tensor(
+            #     value_cache[decode_meta.block_tables].flatten(
+            #         0, 2)[:decode_meta.seq_lens_tensor],
+            #     f"pts/value_cache_{layer_id}.pt")
+            # print("block_table", decode_meta.block_tables)
+            # print("cache_seqlens", decode_meta.seq_lens_tensor)
+            # print("slot_mapping", attn_metadata.slot_mapping)
             # Use flash_attn_with_kvcache for normal decoding.
             # torch.cuda.synchronize()
             # if window_size[0] == -1:
@@ -862,6 +884,9 @@ def unified_flash_attention(
             #     t = timer_window_decode.log()
             #     print(f"window decode time: {t}",
             #           f"cu_seq_lens: {decode_meta.seq_lens_tensor}")
+            # check_tensor(decode_output, f"pts/decode_output_{layer_id}.pt")
+            # if layer_id == '1':
+            #     exit(0)
 
     if prefill_output is None:
         assert decode_output is not None

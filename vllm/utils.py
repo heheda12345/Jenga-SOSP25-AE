@@ -1542,3 +1542,14 @@ class Timer:
             return t * 1e9
         else:
             raise NotImplementedError
+
+
+def check_tensor(tensor: torch.Tensor, file_name: str):
+    ref = torch.load(file_name, map_location="cpu")
+    out = tensor.cpu()
+    print(file_name, tensor.shape, ref.shape)
+    max_diff = (out - ref).abs().max().item()
+    print("max diff", max_diff)
+    if max_diff > 0 and tensor.shape == ref.shape:
+        print("diff", (out - ref).abs().flatten())
+        print("positions", (out - ref).flatten().nonzero())

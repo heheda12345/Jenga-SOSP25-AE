@@ -38,14 +38,14 @@ class NaiveBlockAllocator(BlockAllocator):
         two_level_kwargs: Optional[dict] = None,
         allocator_type: str = "naive",
     ):
-        print(
-            "create NaiveBlockAllocator",
-            create_block,
-            num_blocks,
-            block_size,
-            block_ids,
-            block_pool,
-        )
+        # print(
+        #     "create NaiveBlockAllocator",
+        #     create_block,
+        #     num_blocks,
+        #     block_size,
+        #     block_ids,
+        #     block_pool,
+        # )
         if not enable_two_level_page:
             if block_ids is None:
                 block_ids = range(num_blocks)
