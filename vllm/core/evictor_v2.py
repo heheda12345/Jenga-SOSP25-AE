@@ -2,8 +2,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import enum
 from abc import ABC, abstractmethod
-from typing import OrderedDict, Tuple
-from sortedcontainers import SortedDict
+from typing import TYPE_CHECKING, Dict, List, OrderedDict, Tuple
+from sortedcontainers import SortedDict, SortedSet
+import math
+if TYPE_CHECKING:
+    from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
 
 
 class EvictionPolicy(enum.Enum):
@@ -70,7 +73,6 @@ class BlockMetaData():
         self.num_hashed_tokens = num_hashed_tokens
         self.last_accessed = last_accessed
         self.block_id = block_id
-        self.alive = True
 
 
 class LRUEvictor(Evictor):
@@ -84,7 +86,7 @@ class LRUEvictor(Evictor):
     def __init__(self):
         self.free_table: OrderedDict[
             int, BlockMetaData] = OrderedDict()  # hash -> block_meta
-        self.sorted_table: SortedDict[(int, int, int), int] = SortedDict(
+        self.sorted_table: SortedSet[Tuple[int, int, int]] = SortedSet(
         )  # (last_accessed, -num_hashed_tokens, block_id) -> hash
         self._num_blocks = 0
         self.mark_removed: set[int] = set()
@@ -93,19 +95,11 @@ class LRUEvictor(Evictor):
     def __contains__(self, block_id: int) -> bool:
         return block_id in self.free_table
 
-    # force eviction, for testing only
-    def evict_block_id(self, block_id: int):
-        # print("Evicting block_id:", block_id)
-        block = self.free_table.pop(block_id)
-        self.sorted_table.pop(
-            (block.last_accessed, -block.num_hashed_tokens, block.block_id))
-        return block_id, block.content_hash
-
     def evict(self) -> Tuple[int, int]:
         if self._num_blocks <= 0:
             raise ValueError("No usable cache memory left")
 
-        evicted_block_id = self.sorted_table.popitem(0)[0][2]
+        evicted_block_id = self.sorted_table.pop(0)[2]
         evicted_block = self.free_table.pop(evicted_block_id)
         self._num_blocks -= 1
 
@@ -116,8 +110,8 @@ class LRUEvictor(Evictor):
         self._num_blocks += 1
         if last_accessed == -1:
             # if block_id == 3697:
-            #     print("==============evictor recover block_id:", block_id,
-            #           content_hash, num_hashed_tokens, last_accessed)
+            #     print("==============evictor recover block_id:", id(self),
+            #           block_id, content_hash, num_hashed_tokens, last_accessed)
             #     import traceback
             #     traceback.print_stack()
             # a hack: sliding window may alloc a block and then free it without using it
@@ -128,8 +122,8 @@ class LRUEvictor(Evictor):
             assert block_meta.content_hash == content_hash, f"block_id: {block_id} content_hash not match"
             assert block_meta.num_hashed_tokens == num_hashed_tokens
             self.mark_removed.remove(block_id)
-            self.sorted_table[(block_meta.last_accessed, -num_hashed_tokens,
-                               block_id)] = content_hash
+            self.sorted_table.add(
+                (block_meta.last_accessed, -num_hashed_tokens, block_id))
             return
         # if block_id == 3697:
         #     print("==============evictor add block_id:", block_id,
@@ -140,14 +134,13 @@ class LRUEvictor(Evictor):
         if block_id in self.free_table:
             # to upate the insert time in ordered dict
             block_meta = self.free_table.pop(block_id)
-            self.sorted_table.pop(
-                (block_meta.last_accessed, -block_meta.num_hashed_tokens,
-                 block_meta.block_id))
+            key = (block_meta.last_accessed, -block_meta.num_hashed_tokens,
+                   block_meta.block_id)
+            self.sorted_table.discard(key)
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed, block_id)
-        self.sorted_table[(last_accessed, -num_hashed_tokens,
-                           block_id)] = content_hash
+        self.sorted_table.add((last_accessed, -num_hashed_tokens, block_id))
 
     def update(self, block_id: int, last_accessed: float):
         raise AssertionError("This line should be unreachable.")
@@ -158,24 +151,27 @@ class LRUEvictor(Evictor):
 
     def remove(self, block_id: int):
         # if block_id == 3697:
-        #     print("==============evictor remove block_id:", block_id,
+        #     print("==============evictor remove block_id:", id(self), block_id,
         #           self.remove_by_mark)
         #     import traceback
         #     traceback.print_stack()
         self._num_blocks -= 1
         if block_id not in self.free_table:
             raise ValueError(
-                "Attempting to remove block that's not in the evictor")
+                f"Attempting to remove block {block_id} that's not in the evictor"
+            )
         block_meta = self.free_table[block_id]
 
-        self.sorted_table.pop(
-            (block_meta.last_accessed, -block_meta.num_hashed_tokens,
-             block_meta.block_id))
+        key = (block_meta.last_accessed, -block_meta.num_hashed_tokens,
+               block_meta.block_id)
+        self.sorted_table.discard(key)
 
         if self.remove_by_mark:
             self.mark_removed.add(block_id)
         else:
             self.free_table.pop(block_id)
+
+        return block_id, block_meta.content_hash
 
     @property
     def num_blocks(self) -> int:
@@ -186,7 +182,7 @@ class LRUEvictor(Evictor):
             self.free_table.pop(_id)
             # if _id == 3697:
             #     print("==============evictor confirm_all_remove block_id:",
-            #           _id)
+            #           id(self), _id)
             #     import traceback
             #     traceback.print_stack()
         self.mark_removed.clear()
@@ -200,13 +196,161 @@ class LRUEvictor(Evictor):
         finally:
             self.remove_by_mark = prev_remove_by_mark
 
+    def level0_lru(self) -> Tuple[int, int]:
+        raise NotImplementedError
 
-def make_evictor(eviction_policy: EvictionPolicy) -> Evictor:
+    def evict_level0(self):
+        raise NotImplementedError
+
+
+class Level1LRUEvictor(LRUEvictor):
+
+    def __init__(self, large_small_ratio: int, **kwargs):
+        super().__init__()
+        self.large_small_ratio = large_small_ratio
+        # large_block_id -> num_free_small_blocks
+        self.free_block_counter: Dict[int, int] = {}
+        self.free_level0_blocks: SortedSet[Tuple[int, int, int]] = SortedSet()
+        self.free_level0_table: Dict[int, BlockMetaData] = {
+        }  # block_id -> block_meta
+
+    def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
+            last_accessed: float):
+        super().add(block_id, content_hash, num_hashed_tokens, last_accessed)
+        lv0_block_id = block_id // self.large_small_ratio
+        if lv0_block_id not in self.free_block_counter:
+            self.free_block_counter[lv0_block_id] = 0
+        self.free_block_counter[lv0_block_id] += 1
+        if self.free_block_counter[lv0_block_id] == self.large_small_ratio:
+            block_ids = [
+                lv0_block_id * self.large_small_ratio + i
+                for i in range(self.large_small_ratio)
+            ]
+            lru = (-math.inf, -math.inf)  # last_accessed, -num_hashed_tokens
+            for block_id in block_ids:
+                block_meta = self.free_table[block_id]
+                lru = max(
+                    lru,
+                    (block_meta.last_accessed, -block_meta.num_hashed_tokens))
+            # if lv0_block_id == 84:
+            #     print("add in Level1LRUEvictor:",
+            #           (lru[0], lru[1], lv0_block_id))
+            self.free_level0_blocks.add((lru[0], lru[1], lv0_block_id))
+            self.free_level0_table[lv0_block_id] = BlockMetaData(
+                content_hash, -lru[1], lru[0], lv0_block_id)
+
+    def evict_block_id(self, block_id: int):
+        raise ValueError("should not be called")
+
+    def evict(self):
+        raise ValueError("should not be called. Use evict_level0 instead")
+
+    def update(self, block_id: int, last_accessed: float):
+        raise ValueError("should not be called")
+
+    def remove_level1_block_id(self, lv1_block_id: int):
+        lv0_block_id = lv1_block_id // self.large_small_ratio
+        # if lv1_block_id == 84:
+        #     print(
+        #         "remove_level1_block_id:", lv1_block_id, lv0_block_id,
+        #         self.free_block_counter[lv0_block_id],
+        #         self.free_block_counter[lv0_block_id] ==
+        #         self.large_small_ratio)
+        if self.free_block_counter[lv0_block_id] == self.large_small_ratio:
+            block_meta = self.free_level0_table.pop(lv0_block_id)
+            key = (block_meta.last_accessed, -block_meta.num_hashed_tokens,
+                   lv0_block_id)
+            # if lv0_block_id == 84:
+            #     print("to remove", key)
+            assert key in self.free_level0_blocks, "key {} not in free_level0_blocks".format(
+                key)
+            self.free_level0_blocks.discard(key)
+        self.free_block_counter[lv0_block_id] -= 1
+
+    def remove(self, lv1_block_id):
+        super().remove(lv1_block_id)
+        self.remove_level1_block_id(lv1_block_id)
+        # TODO: handle level0 budget
+
+    @property
+    def num_blocks(self) -> int:
+        return super(
+        ).num_blocks - self.num_lv0_blocks * self.large_small_ratio
+
+    def level0_lru(self) -> Tuple[int, int]:
+        block = next(iter(self.free_level0_blocks))
+        return block[0], block[1]
+
+    @property
+    def num_lv0_blocks(self):
+        return len(self.free_level0_blocks)
+
+    def evict_level0(
+            self) -> Tuple[int, List[int]]:  # lv0_block_id, lv1_block_ids
+        if len(self.free_level0_blocks) == 0:
+            raise ValueError("No usable cache memory left")
+        evicted_block = iter(self.free_level0_blocks).__next__()
+        lv0_block_id = evicted_block[2]
+        # if lv0_block_id == 84:
+        #     print("evict in evict_level0:", lv0_block_id)
+
+        lv1_block_ids = [
+            lv0_block_id * self.large_small_ratio + i
+            for i in range(self.large_small_ratio)
+        ]
+        for lv1_block_id in lv1_block_ids:
+            self.remove(lv1_block_id)
+        return lv0_block_id, lv1_block_ids
+
+    def evict_level1(self) -> Tuple[int, int]:
+        if self._num_blocks <= 0:
+            raise ValueError("No usable cache memory left")
+        lv1_block_id, content_hash = super().evict()
+        self.remove_level1_block_id(lv1_block_id)
+
+        return lv1_block_id, content_hash
+
+
+def make_evictor(eviction_policy: EvictionPolicy, enable_two_level_page: bool,
+                 two_level_kwargs) -> Evictor:
     if eviction_policy == EvictionPolicy.LRU:
-        return LRUEvictor()
+        if enable_two_level_page:
+            return Level1LRUEvictor(**two_level_kwargs)
+        else:
+            return LRUEvictor()
     else:
         raise ValueError(f"Unknown cache eviction policy: {eviction_policy}")
 
 
-class TwoLevelLRUEvictor:
-    pass
+class Level0LRUEvictor:
+
+    def __init__(self, level1_evictors: Dict[str, Level1LRUEvictor],
+                 level1_allocators: Dict[str, "PrefixCachingBlockAllocator"]):
+        self.level1_evictors: Dict[str, Level1LRUEvictor] = level1_evictors
+        self.level1_allocators: Dict[
+            str, "PrefixCachingBlockAllocator"] = level1_allocators
+        for allocator in level1_allocators.values():
+            assert allocator.level0_evictor is None
+            allocator.level0_evictor = self
+
+    def evict_level0(self):
+        worst_evictor: str = ""
+        worst_lru = (math.inf, 0)  # last_accessed, -num_hashed_tokens
+        for evictor_name, evictor in self.level1_evictors.items():
+            if evictor.num_lv0_blocks == 0:
+                continue
+            lru = evictor.level0_lru()
+            if lru < worst_lru:
+                worst_lru = lru
+                worst_evictor = evictor_name
+
+        assert worst_evictor != ""
+        lv0_block_id, lv1_block_ids = self.level1_evictors[
+            worst_evictor].evict_level0()
+        self.level1_allocators[worst_evictor].remove_blocks_from_evictor(
+            lv1_block_ids)
+
+    @property
+    def num_lv0_blocks(self):
+        return sum(evictor.num_lv0_blocks
+                   for evictor in self.level1_evictors.values())

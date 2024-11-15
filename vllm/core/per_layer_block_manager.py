@@ -146,8 +146,13 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
         return block_ids
 
     def get_num_free_gpu_blocks(self) -> int:
-        return self.custom_block_manager.global_block_allocator.get_num_free_blocks(
+        free_blocks = self.custom_block_manager.global_block_allocator.get_num_free_blocks(
             Device.GPU)
+        if self.custom_block_manager.scheduler_config.enable_two_level_page and \
+                self.custom_block_manager.cache_config.enable_prefix_caching:
+            # if not enable two level page, the evicted blocks are counted in free_blocks
+            free_blocks += self.custom_block_manager.global_evictor.num_lv0_blocks
+        return free_blocks
 
     def get_num_free_cpu_blocks(self) -> int:
         return self.custom_block_manager.global_block_allocator.get_num_free_blocks(

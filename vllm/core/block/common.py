@@ -62,7 +62,7 @@ class RefCounter(RefCounterProtocol):
         #     import traceback
         #     traceback.print_stack()
 
-        assert refcount > 0
+        assert refcount > 0, f"Block {block_id} has refcount {refcount}"
         refcount -= 1
 
         self._refcounts[block_id] = refcount
@@ -237,7 +237,9 @@ class BlockPool:
         return block
 
     def free_block(self, block: Block) -> None:
+        assert block.pool_id is not None
         self._free_ids.appendleft(block.pool_id)  # type: ignore[attr-defined]
+        block.pool_id = None  # type: ignore[attr-defined]
 
 
 class BlockList:

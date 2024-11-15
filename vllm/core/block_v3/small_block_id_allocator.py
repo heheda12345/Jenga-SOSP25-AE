@@ -39,7 +39,10 @@ class SmallBlockIDAllocator:
         self.new_large_block_quota = new_large_block_quota
 
     def allocate_block_id(
-            self, seq_id: int) -> Tuple[int, List[int]]:  # small_block_id
+            self,
+            seq_id: int,
+            affine_only: bool = False
+    ) -> Tuple[int, List[int]]:  # small_block_id
         if len(self.free_block_id_with_prefer[seq_id]) == 0:
             if self.new_large_block_quota > 0:
                 # allocate new large block
@@ -79,7 +82,7 @@ class SmallBlockIDAllocator:
                     (i, None) for i in all_small_block_ids)
                 self.large_block_to_seq_id[lv0_block_id] = seq_id
 
-            else:
+            elif not affine_only:
                 for victim_seq_id, small_block_ids in self.free_block_id_with_prefer.items(
                 ):
                     if small_block_ids:
@@ -87,6 +90,8 @@ class SmallBlockIDAllocator:
                         break
                 else:
                     raise SmallBlockIDAllocator.NoFreeLevel1BlocksError()
+            else:
+                raise SmallBlockIDAllocator.NoFreeLevel1BlocksError()
         else:
             small_block_id = self.free_block_id_with_prefer[seq_id].popitem(
                 last=False)[0]

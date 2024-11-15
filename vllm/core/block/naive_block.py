@@ -146,7 +146,8 @@ class NaiveBlockAllocator(BlockAllocator):
                                prev_block: Optional[Block],
                                seq_id: int,
                                group_id_hash: int = 0,
-                               device: Optional[Device] = None) -> Block:
+                               device: Optional[Device] = None,
+                               affine_only: bool = False) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -159,7 +160,8 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         # assert device is None
         # we can ignore _group_id_hash in naive block allocator
-        block_id = self._allocate_block_id(seq_id=seq_id)
+        block_id = self._allocate_block_id(seq_id=seq_id,
+                                           affine_only=affine_only)
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
                                             block_size=self._block_size,
@@ -167,10 +169,12 @@ class NaiveBlockAllocator(BlockAllocator):
                                             group_id_hash=group_id_hash)
         return block
 
-    def _allocate_block_id(self, seq_id: int) -> BlockId:
+    def _allocate_block_id(self,
+                           seq_id: int,
+                           affine_only: bool = False) -> BlockId:
         if self.enable_two_level_page:
             block_id = self._block_id_allocator.allocate_block_id(
-                seq_id=seq_id)
+                seq_id=seq_id, affine_only=affine_only)
         else:
             if not self._free_block_indices:
                 raise BlockAllocator.NoFreeBlocksError()

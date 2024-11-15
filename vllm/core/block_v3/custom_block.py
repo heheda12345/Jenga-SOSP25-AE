@@ -411,7 +411,7 @@ class SlidingWindowManager(AppAwareManager):
         assert num_computed_slots is not None
         end_block_idx = (
             num_computed_slots // self.block_size
-        ) - self.max_block_sliding_window - 12  # remove -12 for run test
+        ) - self.max_block_sliding_window - 12  # - 12 EVAL_EVAL remove -12 for run test
         end_block_idx = max(end_block_idx, 0)
         # if block_table.free_start < end_block_idx:
         #     print("free_skipped_blocks", block_table.free_start, end_block_idx)
@@ -458,7 +458,7 @@ class SlidingWindowManager(AppAwareManager):
         # 1 is a magic number to make the touched range a little larger
         prefix_to_null_block(block_table, block_allocator,
                              num_blocks - self.max_block_sliding_window -
-                             2)  # TODO: -1 here for run test
+                             2)  # TODO: -1 here for run test EVAL_EVAL -2
         return block_table.physical_block_ids[:num_blocks]
 
     def update_seq_blocks_last_access(

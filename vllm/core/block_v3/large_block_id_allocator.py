@@ -6,6 +6,9 @@ from vllm.utils import Device
 
 class LargeBlockIDAllocator:
 
+    class NoFreeLevel0BlocksError(ValueError):
+        pass
+
     def __init__(self, num_blocks: int):
         self.num_blocks = num_blocks
         self.free_block_ids = deque(range(num_blocks))
@@ -19,6 +22,8 @@ class LargeBlockIDAllocator:
             raise ValueError(f"Unsupported device: {device}")
 
     def allocate_block_id(self):
+        if len(self.free_block_ids) == 0:
+            raise self.NoFreeLevel0BlocksError()
         return self.free_block_ids.popleft()
 
     def free_block_id(self, block_id):

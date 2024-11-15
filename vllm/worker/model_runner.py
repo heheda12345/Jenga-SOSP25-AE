@@ -2004,11 +2004,9 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
 
         if self.backend_name != "placeholder-attn":
-            self.input_buffers["slot_mapping"].copy_(
-                attn_metadata.slot_mapping, non_blocking=True)
-
-        self.attn_state.prepare_graph_input_buffers(
-            self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
+            self.attn_state.prepare_graph_input_buffers(
+                self.input_buffers, attn_metadata,
+                self._is_encoder_decoder_model)
 
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,

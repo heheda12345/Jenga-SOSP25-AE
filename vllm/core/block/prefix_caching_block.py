@@ -8,8 +8,9 @@ from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.block.null_block import NULL_BLOCK_SEQ_ID, NullBlock
+from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
 from vllm.core.block_v3.small_block_id_allocator import SmallBlockIDAllocator
-from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.core.evictor_v2 import EvictionPolicy, Evictor, Level0LRUEvictor, make_evictor
 from vllm.core.interfaces import ComputedBlock
 
 PrefixHash = int
@@ -69,12 +70,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         two_level_kwargs: Optional[dict] = None,
         allocator_type: str = "prefix_caching",
     ):
-        print(
-            "create PrefixCachingBlockAllocator",
-            num_blocks,
-            block_size,
-            owned_block_ids,
-        )
         if owned_block_ids is None:
             owned_block_ids = range(num_blocks)
         all_possible_block_ids = range(num_blocks)
@@ -85,6 +80,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
         self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+        self._cached_blocks_rev: Dict[BlockId, PrefixHash] = {}
 
         # A list of immutable block IDs that have been touched by scheduler
         # and should be marked as computed after an entire batch of sequences
@@ -119,7 +115,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # Evitor used to maintain how we want to handle those computed blocks
         # if we find memory pressure is high.
-        self.evictor: Evictor = make_evictor(eviction_policy)
+        self.evictor: Evictor = make_evictor(eviction_policy,
+                                             enable_two_level_page,
+                                             two_level_kwargs)
+        self.level0_evictor: Optional[Level0LRUEvictor] = None
 
         # We share the refcounter between allocators. This allows us to promote
         # blocks originally allocated in the hashless allocator to immutable
@@ -291,6 +290,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._hashless_allocator.free(block, keep_block_object=True)
             # recover the changes during allocate_immutable_block
             self._cached_blocks.pop(block.content_hash)
+            self._cached_blocks_rev.pop(block_id)
             self._touched_blocks.remove(block_id)
         # Stop tracking the block
         self._untrack_block_id(block_id)
@@ -315,14 +315,36 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """First tries to allocate a block id from the hashless allocator,
         and if there are no blocks, then tries to evict an unused cached block.
         """
-        hashless_block_id = self._maybe_allocate_hashless_block_id(seq_id)
-        if hashless_block_id is not None:
-            return hashless_block_id
 
         if self.enable_two_level_page:
-            evicted_block_id = self._maybe_allocate_evicted_block_id_two_level(
-                seq_id)
+            # TODO: high two-level allocation budget will lead to more evictions
+            # Allocate mutable block and extract its block_id
+            # order for two level
+            # if has quota:
+            #   1. allocate lv1 page from affiliative lv0 page, allocate new lv0 page if needed
+            #   2. evict lv0 page from evictor, then allocate in step 3
+            # if not has quota
+            #   3. allocate lv1 page from hashless allocator without allocate new lv0 page
+            #   4. evict lv1 page from evictor
+            hashless_block_id = self._maybe_allocate_hashless_block_id(
+                seq_id, affine_only=True)
+            if hashless_block_id is not None:
+                return hashless_block_id
+            self._maybe_evict_lv0_page()
+            # if we evict an lv0 page, this allocation will be successful
+            hashless_block_id = self._maybe_allocate_hashless_block_id(
+                seq_id, affine_only=False)
+            if hashless_block_id is not None:
+                return hashless_block_id
+            evicted_block_id = self._maybe_allocate_evicted_block_id_level1(
+                seq_id, affine_only=False)
+            if evicted_block_id is not None:
+                return evicted_block_id
+
         else:
+            hashless_block_id = self._maybe_allocate_hashless_block_id(seq_id)
+            if hashless_block_id is not None:
+                return hashless_block_id
             evicted_block_id = self._maybe_allocate_evicted_block_id(seq_id)
         if evicted_block_id is not None:
             return evicted_block_id
@@ -331,18 +353,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         raise BlockAllocator.NoFreeBlocksError()
 
     def _maybe_allocate_hashless_block_id(self,
-                                          seq_id: int) -> Optional[BlockId]:
+                                          seq_id: int,
+                                          affine_only: bool = False
+                                          ) -> Optional[BlockId]:
         try:
-            # TODO: high two-level allocation budget will lead to more evictions
-            # Allocate mutable block and extract its block_id
             block = self._hashless_allocator.allocate_mutable_block(
-                prev_block=None, seq_id=seq_id)
+                prev_block=None, seq_id=seq_id, affine_only=affine_only)
             block_id = block.block_id
             self._block_pool.free_block(block)
 
             self._track_block_id(block_id, computed=False)
             return block_id
-        except BlockAllocator.NoFreeBlocksError:
+        except (BlockAllocator.NoFreeBlocksError,
+                SmallBlockIDAllocator.NoFreeLevel1BlocksError,
+                LargeBlockIDAllocator.NoFreeLevel0BlocksError):
             return None
 
     def _maybe_allocate_evicted_block_id(self,
@@ -363,9 +387,28 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return block_id
 
-    def _maybe_allocate_evicted_block_id_two_level(
-            self, seq_id: int) -> Optional[BlockId]:
-        raise NotImplementedError
+    def _maybe_evict_lv0_page(self):
+        # the quota can ensure that the evictor can always evict a block
+        # we evict a lv0 page here, then we can allocate a new lv1 page in next step
+        if self._hashless_allocator._block_id_allocator.new_large_block_quota > 0:
+            self.level0_evictor.evict_level0()
+
+    def _maybe_allocate_evicted_block_id_level1(self):
+        if self.evictor.num_blocks == 0:
+            return None
+
+        # Here we get an evicted block, which is only added
+        # into evictor if its ref counter is 0
+        # and since its content would be changed, we need
+        # to remove it from _cached_blocks's tracking list
+        block_id, content_hash_to_evict = self.evictor.evict_level1()
+
+        self.remove_cached_block(block_id, content_hash_to_evict)
+
+        self._refcounter.incr(block_id)
+        self._track_block_id(block_id, computed=False)
+
+        return block_id
 
     def remove_cached_block(self, block_id: int,
                             content_hash_to_evict: int) -> None:
@@ -376,6 +419,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert _block_id == block_id
 
         self._cached_blocks.pop(content_hash_to_evict)
+        self._cached_blocks_rev.pop(block_id)
 
     def evict_block_id(self, block_id: int) -> None:  # for testing only
         # Here we get an evicted block, which is only added
@@ -391,6 +435,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert _block_id == block_id
 
         self._cached_blocks.pop(content_hash_to_evict)
+        self._cached_blocks_rev.pop(block_id)
 
     def _free_block_id(self, block: Block) -> None:
         """Decrements the refcount of the block. The block may be in two 
@@ -526,6 +571,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # because other sequences in the same batch cannot reuse
             # this block.
             self._cached_blocks[block.content_hash] = block.block_id
+            self._cached_blocks_rev[block.block_id] = block.content_hash
             # Mark this block as touched so that it can be marked as
             # computed after the entire batch of sequences are scheduled.
             self._touched_blocks.add(block.block_id)
@@ -752,6 +798,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def remove_seq(self, seq_id: int) -> None:
         self._hashless_allocator.remove_seq(seq_id)
+
+    def remove_blocks_from_evictor(self, block_ids: List[int]) -> None:
+        for block_id in block_ids:
+            refcount = self._refcounter.get(block_id)
+            assert refcount == 0, "block_id = {} refcount = {}".format(
+                block_id, refcount)
+            self._hashless_allocator._block_id_allocator.free_block_id(
+                block_id)
+            block_hash = self._cached_blocks_rev[block_id]
+            self._cached_blocks.pop(block_hash)
 
 
 class PrefixCachingBlock(Block):

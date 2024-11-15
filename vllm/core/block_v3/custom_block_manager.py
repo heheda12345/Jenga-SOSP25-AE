@@ -13,6 +13,7 @@ from vllm.core.block.interfaces import (
 from vllm.core.block.naive_block import NaiveBlockAllocator, NaiveBlock
 from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAccessBlocksTracker, PrefixCachingBlockAllocator
 from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
+from vllm.core.evictor_v2 import Level0LRUEvictor
 from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
@@ -118,6 +119,7 @@ class CustomBlockManager:
                 num_blocks=self.num_total_gpu_blocks)
             if self.cache_config.enable_prefix_caching:
                 self.group_allocators = {}
+                level1_evictors = {}
                 for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
                 ):
                     schedule_component = kv_cache_schedule_config.groups[
@@ -143,6 +145,9 @@ class CustomBlockManager:
                     allocator._hashless_allocator._block_id_allocator.set_new_large_block_quota(
                         0)
                     self.group_allocators[group_id] = allocator
+                    level1_evictors[group_id] = allocator.evictor
+                self.global_evictor = Level0LRUEvictor(level1_evictors,
+                                                       self.group_allocators)
             else:
                 self.group_allocators = {}
 
@@ -372,6 +377,13 @@ class CustomBlockManager:
     def get_num_required_block_small_to_large(
             self, num_required_blocks: Dict[str, int],
             seq_id: int) -> Tuple[Dict[str, int], Dict[str, int]]:
+        # Different types of allocation status:
+        # 1. not allocated level0 page. belongs to global_block_allocator
+        # 2. allocated level0 page, some level1 pages are allocated
+        # 3. allocated level0 page, all level1 pages are freed
+        #   - all level1 pages are in the evictor:
+        #   - some level1 pages are in the evictor, others are in
+        #   -
         num_large_blocks_min: Dict[str, int] = {}
         num_large_blocks_max: Dict[str, int] = {}
         for group_id, num_required_small_blocks in num_required_blocks.items():
@@ -400,6 +412,8 @@ class CustomBlockManager:
         total_large_blocks_max = sum(block_info.num_large_blocks_max.values())
         num_free_large_blocks = self.global_block_allocator.get_num_free_blocks(
         )
+        if self.scheduler_config.enable_two_level_page and self.cache_config.enable_prefix_caching:
+            num_free_large_blocks += self.global_evictor.num_lv0_blocks
         if num_free_large_blocks >= total_large_blocks_max:
             new_large_block_quota = block_info.num_large_blocks_max
         elif num_free_large_blocks >= total_large_blocks_min:

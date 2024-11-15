@@ -32,7 +32,8 @@ def test_gemma_eviction():
     outputs = llm.generate(inputs2, sampling_params=sampling_params)
 
     evictor = llm.llm_engine.scheduler[
-        0].block_manager.global_block_allocator._allocators[Device.GPU].evictor
+        0].block_manager.custom_block_manager.global_block_allocator._allocators[
+            Device.GPU].evictor
     r'''
     # the allocated blocks are: (N refers to NULL block)
     sliding window:  0- 1- 2- 3- 4- 5- 6- 7- 8-19-21 (input1)
@@ -41,7 +42,7 @@ def test_gemma_eviction():
                                         \23-24-26-28 (input2)
     '''
     evict_order = [
-        2, 1, 0, (19, 20), (8, 17), (7, 16), 4, 3, 5, 6, (25, 26), (21, 24),
+        2, 1, 0, 4, 3, 5, 6, (19, 20), (8, 17), (7, 16), (25, 26), (21, 24),
         (22, 23), 15, 14, 13, 12, 11, 10, 9
     ]  # (a, b) means a and b can be evicted in arbitrary order
     evict_time = {}
