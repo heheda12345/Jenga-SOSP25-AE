@@ -24,9 +24,19 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
 
 timer_window_prefill = Timer(unit="ms", color=True)
+timer_window_cache = Timer(unit="ms", color=True)
 timer_window_decode = Timer(unit="ms", color=True)
 timer_self_prefill = Timer(unit="ms", color=True)
+timer_self_cache = Timer(unit="ms", color=True)
 timer_self_decode = Timer(unit="ms", color=True)
+timers = {
+    "window_prefill": timer_window_prefill,
+    "window_cache": timer_window_cache,
+    "window_decode": timer_window_decode,
+    "self_prefill": timer_self_prefill,
+    "self_cache": timer_self_cache,
+    "self_decode": timer_self_decode,
+}
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -602,6 +612,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         return output
 
+layer_id: int = 0
+prefill_id: int = 0
 
 @torch.library.custom_op("vllm::unified_flash_attention",
                          mutates_args=["kv_cache"])
@@ -672,6 +684,13 @@ def unified_flash_attention(
     decode_output: Optional[torch.Tensor] = None
 
     if prefill_meta := attn_metadata.prefill_metadata:
+        # global prefill_id
+        # print("checking prefill_meta", kv_cache.numel(), prefill_meta.block_tables is None,
+        #   prefill_meta.block_tables is not None and prefill_meta.block_tables.numel() == 0)
+        # if kv_cache.numel() > 0:
+        #     torch.save(query, f"pts/prefill_query_{prefill_id}.pt")
+        #     torch.save(key, f"pts/prefill_key_{prefill_id}.pt")
+        #     torch.save(value, f"pts/prefill_value_{prefill_id}.pt")
         # Prompt run.
         if (kv_cache.numel() == 0 or prefill_meta.block_tables is None
                 or prefill_meta.block_tables.numel() == 0):
@@ -699,12 +718,22 @@ def unified_flash_attention(
             )
             # torch.cuda.synchronize()
             # if window_size[0] == -1:
-            #     timer_self_prefill.log()
+            #     t = timer_self_prefill.log()
+            #     print(f"self prefill time: {t}",
+            #           f"cu_seq_lens_q: {prefill_meta.seq_start_loc}",
+            #           f"cu_seq_lens_k: {prefill_meta.seq_start_loc}")
             # else:
-            #     timer_window_prefill.log()
+            #     t = timer_window_prefill.log()
+            #     print(f"window prefill time: {t}",
+            #           f"cu_seq_lens_q: {prefill_meta.seq_start_loc}",
+            #           f"cu_seq_lens_k: {prefill_meta.seq_start_loc}")
         else:
             # prefix-enabled attention
-            # raise NotImplementedError("Prefix cache is not supported.")
+            # torch.cuda.synchronize()
+            # if window_size[0] == -1:
+            #     timer_self_cache.start()
+            # else:
+            #     timer_window_cache.start()
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
@@ -722,7 +751,20 @@ def unified_flash_attention(
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
             )
-
+            # torch.cuda.synchronize()
+            # if window_size[0] == -1:
+            #     t = timer_self_cache.log()
+            #     print(f"self cache time: {t}",
+            #           f"cu_seq_lens_q: {prefill_meta.query_start_loc}",
+            #           f"cu_seq_lens_k: {prefill_meta.seq_start_loc}")
+            # else:
+            #     t = timer_window_cache.log()
+            #     print(f"window cache time: {t}",
+            #           f"cu_seq_lens_q: {prefill_meta.query_start_loc}",
+            #           f"cu_seq_lens_k: {prefill_meta.seq_start_loc}")
+        # if kv_cache.numel() > 0:
+        #     torch.save(prefill_output, f"pts/prefill_output_{prefill_id}.pt")
+        #     prefill_id = prefill_id + 1
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
@@ -734,6 +776,7 @@ def unified_flash_attention(
         # else:
         #     timer_window_decode.start() 
         if decode_meta.max_decode_query_len > 1:
+            raise NotImplementedError("need more checks")
             if window_size[0] != -1:
                 raise NotImplementedError
             decode_output = flash_attn_varlen_func(
@@ -753,6 +796,21 @@ def unified_flash_attention(
             )
         else:
             # Use flash_attn_with_kvcache for normal decoding.
+            # print("decode_query", decode_query.unsqueeze(1).shape)
+            # global layer_id
+            # print("layer_id", layer_id)
+            # print("decode_shape", decode_query.shape, key_cache.shape,
+            #       value_cache.shape)
+            # print("block_table", decode_meta.block_tables)
+            # print("cache_seqlens", decode_meta.seq_lens_tensor)
+            # print("window_size", window_size)
+            # # print("q:", decode_query.unsqueeze(1))
+            # # print("key_cache", kv_cache[0][decode_meta.block_tables].flatten(0,2)[:decode_meta.seq_lens_tensor])
+            # # print("value_cache", kv_cache[1][decode_meta.block_tables].flatten(0,2)[:decode_meta.seq_lens_tensor])
+            # torch.save(decode_query.unsqueeze(1), f"pts/decode_query_{layer_id}.pt")
+            # torch.save(kv_cache[0][decode_meta.block_tables].flatten(0,2)[:decode_meta.seq_lens_tensor], f"pts/key_cache_{layer_id}.pt")
+            # torch.save(kv_cache[1][decode_meta.block_tables].flatten(0,2)[:decode_meta.seq_lens_tensor], f"pts/value_cache_{layer_id}.pt")
+            # # import pdb; pdb.set_trace()
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
@@ -765,11 +823,17 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
+            # torch.save(decode_output, f"pts/decode_output_{layer_id}.pt")
+            # layer_id += 1
         # torch.cuda.synchronize()
         # if window_size[0] == -1:
-        #     timer_self_decode.log()
+        #     t = timer_self_decode.log()
+        #     print(f"self decode time: {t}",
+        #           f"cu_seq_lens: {decode_meta.seq_lens_tensor}")
         # else:
-        #     timer_window_decode.log()
+        #     t = timer_window_decode.log()
+        #     print(f"window decode time: {t}",
+        #           f"cu_seq_lens: {decode_meta.seq_lens_tensor}")
 
     if prefill_output is None:
         assert decode_output is not None

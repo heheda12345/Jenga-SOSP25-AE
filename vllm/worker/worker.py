@@ -492,10 +492,10 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
     max_seq_len = block_size * num_gpu_blocks
-    if not is_attention_free and max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+    # if not is_attention_free and max_model_len > max_seq_len:
+    #     raise ValueError(
+    #         f"The model's max seq len ({max_model_len}) "
+    #         "is larger than the maximum number of tokens that can be "
+    #         f"stored in KV cache ({max_seq_len}). Try increasing "
+    #         "`gpu_memory_utilization` or decreasing `max_model_len` when "
+    #         "initializing the engine.")
