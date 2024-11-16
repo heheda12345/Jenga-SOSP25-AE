@@ -1473,6 +1473,7 @@ class Timer:
         self.max = max(self.max, duration)
         self.sum += duration
         self.cnt += 1
+        return self.convert_unit(duration)
         # print("iter {} time: {:.4f} {}".format(self.cnt, self.convert_unit(duration), self.unit))
 
     def report(self, color=None, text=None):

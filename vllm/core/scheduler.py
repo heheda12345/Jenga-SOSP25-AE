@@ -1365,6 +1365,7 @@ class Scheduler:
                     seq_group.metrics.scheduler_time += scheduler_time
                 else:
                     seq_group.metrics.scheduler_time = scheduler_time
+                break
 
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
