@@ -117,6 +117,9 @@ class MultiModalRegistry:
         merged_dict: Dict[str, NestedTensors] = {}
 
         for data_key, data_value in data.items():
+            if data_key == 'text':  # a hack to pass full input_text to chunk prefill
+                merged_dict['text'] = data_value
+                continue
             plugin = self._get_plugin(data_key)
 
             num_items = len(data_value) if isinstance(data_value, list) else 1

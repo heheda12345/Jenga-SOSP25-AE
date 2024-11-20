@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 
 
 class TextPrompt(TypedDict):
@@ -147,6 +147,12 @@ class LLMInputs(TypedDict):
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    multi_modal_placeholders: NotRequired[
+        Optional["MultiModalPlaceholderDict"]]
+    """
+    Placeholder ranges for the multi-modal data.
     """
 
 

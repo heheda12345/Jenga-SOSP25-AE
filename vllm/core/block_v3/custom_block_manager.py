@@ -1,9 +1,9 @@
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Dict, NewType, Tuple, Union
+from typing import List, Optional, Dict, NewType, Set, Tuple, Union
 
-from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVCacheScheduleConfig, KVCacheScheduleGroupConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVCacheScheduleConfig, KVCacheScheduleGroupConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig, SharedTokenType
 from vllm.core.block.common import BlockList
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import (
@@ -18,7 +18,7 @@ from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareManager
+from vllm.core.block_v3.custom_block import AppAwareManager, SharedBlockManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
@@ -221,13 +221,53 @@ class CustomBlockManager:
     @property
     @require_kv_config_init
     def kv_cache_config(self):
-        assert self._initialized
         return self._kv_cache_config
 
+    @property
+    @require_kv_config_init
+    def kv_cache_schedule_config(self):
+        return self._kv_cache_schedule_config
+
+    def _process_layer_sharing(
+            self, layer_sharing: Set[str], kv_cache_config: KVCacheConfig,
+            kv_cache_schedule_config: KVCacheScheduleConfig):
+        for s_layer_id in layer_sharing:
+            mgr = self._app_aware_managers[s_layer_id]
+            assert isinstance(mgr, SharedBlockManager)
+            can_share_with = mgr.share_with_layer_ids
+            for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
+            ):
+                group_page_size = kv_cache_config.components[
+                    layer_ids[0]].page_size * len(layer_ids)
+                if set(layer_ids) <= can_share_with and \
+                      group_page_size >= mgr.get_page_size():
+                    # share layer with group group_id
+                    if group_page_size % mgr.get_block_size() != 0:
+                        raise NotImplementedError
+                    kv_cache_config.kv_cache_sharing[s_layer_id] = group_id
+                    ref_component = kv_cache_config.components[layer_ids[0]]
+                    kv_cache_config.components[s_layer_id] = SharedTokenType(
+                        start_bias=0,
+                        num_elements=ref_component.num_elements,
+                        page_size=ref_component.page_size * len(layer_ids),
+                        physical_token_shape=[
+                            group_page_size // mgr.get_block_size(),
+                        ],
+                        view_token_shape=[
+                            mgr.get_page_size() // mgr.get_block_size(),
+                        ])
+                    kv_cache_config.kv_cache_sharing[s_layer_id] = group_id
+                    break
+            else:
+                raise ValueError(
+                    f"Cannot find a group to share layer {s_layer_id}")
+
     def _compile_two_level(
-            self, group_result: GroupResult, available_num_elements: int,
-            dtype: ComponentType
+            self, group_result: GroupResult, layer_sharing: Set[str],
+            available_num_elements: int, dtype: ComponentType
     ) -> Tuple[KVCacheConfig, KVCacheScheduleConfig]:
+        if len(layer_sharing) > 0:
+            raise NotImplementedError
         group_layer_mapping = {}  # {app_property -> [layer_id]}}
         group_page_size = {}  # {app_property -> page_size_of_group}
         layer_page_size = {}  # {layer_id -> page_size_of_layer}
@@ -247,7 +287,8 @@ class CustomBlockManager:
                                         buffer_dtype=dtype,
                                         level0_page_size=level0_page_size,
                                         components={},
-                                        block_table_sharing={})
+                                        block_table_sharing={},
+                                        kv_cache_sharing={})
         num_pages -= 1  # to avoid overflow due to start_bias
         kv_cache_schedule_config = KVCacheScheduleConfig(
             groups={}, num_level0_pages=num_pages)
@@ -278,8 +319,8 @@ class CustomBlockManager:
         return kv_cache_config, kv_cache_schedule_config
 
     def _compile_single_page_size(
-            self, group_result: GroupResult, available_num_elements: int,
-            dtype: ComponentType
+            self, group_result: GroupResult, layer_sharing: Set[str],
+            available_num_elements: int, dtype: ComponentType
     ) -> Tuple[KVCacheConfig, KVCacheScheduleConfig]:
         page_size = list(group_result.keys())[0]
         groups = group_result[page_size]  # {app_property -> [layer_id]}
@@ -298,7 +339,8 @@ class CustomBlockManager:
                                         buffer_dtype=dtype,
                                         level0_page_size=allocator_page_size,
                                         components={},
-                                        block_table_sharing={})
+                                        block_table_sharing={},
+                                        kv_cache_sharing={})
         num_pages -= 1  # to avoid overflow due to start_bias
         kv_cache_schedule_config = KVCacheScheduleConfig(
             groups={}, num_level0_pages=num_pages)
@@ -325,10 +367,27 @@ class CustomBlockManager:
                             block_size=self._app_aware_managers[layer_id].
                             get_block_size(),
                         )
+
+        self._process_layer_sharing(layer_sharing, kv_cache_config,
+                                    kv_cache_schedule_config)
+
         print("num_pages", num_pages)
         print("kv_cache_config", kv_cache_config)
         print("kv_cache_schedule_config", kv_cache_schedule_config)
         return kv_cache_config, kv_cache_schedule_config
+
+    def assert_sharing_compatible(self, layer_sharing: Set[str]):
+        for layer_id1 in layer_sharing:
+            mgr1 = self._app_aware_managers[layer_id1]
+            assert isinstance(mgr1, SharedBlockManager)
+            for layer_id2 in layer_sharing:
+                if layer_id1 == layer_id2:
+                    continue
+                mgr2 = self._app_aware_managers[layer_id2]
+                assert isinstance(mgr2, SharedBlockManager)
+                assert mgr1.share_with_layer_ids & mgr2.share_with_layer_ids \
+                    == set(), \
+                f"Layer {layer_id1} and {layer_id2} are not compatible"
 
     @require_kv_config_not_init
     def _compile_get_kv_cache_config(
@@ -337,7 +396,11 @@ class CustomBlockManager:
         dtype = assert_and_get_same_dtype(self._app_aware_managers.values())
         available_num_elements = available_gpu_memory // get_dtype_size(dtype)
         group_result: GroupResult = {}
+        layer_sharing: Set[str] = set()
         for layer_id, manager in self._app_aware_managers.items():
+            if isinstance(manager, SharedBlockManager):
+                layer_sharing.add(layer_id)
+                continue
             page_size = manager.get_page_size()
             if page_size not in group_result:
                 group_result[page_size] = {}
@@ -346,13 +409,15 @@ class CustomBlockManager:
                 group_result[page_size][app_property] = []
             group_result[page_size][app_property].append(layer_id)
 
+        self.assert_sharing_compatible(layer_sharing)
+
         assert self.scheduler_config.use_per_layer_block_manager
         if self.scheduler_config.enable_two_level_page:
-            return self._compile_two_level(group_result,
+            return self._compile_two_level(group_result, layer_sharing,
                                            available_num_elements, dtype)
         else:
             assert len(group_result) == 1
-            return self._compile_single_page_size(group_result,
+            return self._compile_single_page_size(group_result, layer_sharing,
                                                   available_num_elements,
                                                   dtype)
 

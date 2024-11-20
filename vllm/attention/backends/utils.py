@@ -1,5 +1,6 @@
 """Attention backend utils"""
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, TypeVar, Union
 
 import numpy as np
@@ -8,6 +9,7 @@ import torch
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.core.interfaces import BLOCK_IDS
+from vllm.multimodal.base import MultiModalInputs, BatchedTensorInputs
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -313,6 +315,114 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         )
 
 
+@dataclass
+class MMEmbeddingMetadata(AttentionMetadata):
+    # for the full text of a request, only contains requests that did not run encoder
+    num_mm_prefills: int
+    mm_slot_mapping: torch.Tensor
+    mm_token_ids: torch.Tensor
+    multi_modal_inputs: BatchedTensorInputs
+
+    @classmethod
+    def for_capture(cls):
+        return MMEmbeddingMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=0,
+            slot_mapping=torch.tensor([], dtype=torch.int),
+            num_mm_prefills=0,
+            mm_slot_mapping=torch.tensor([], dtype=torch.int),
+            mm_token_ids=torch.tensor([], dtype=torch.int),
+            multi_modal_inputs=[],
+        )
+
+
+class MMEmbeddingMetadataBuilder(AttentionMetadataBuilder[MMEmbeddingMetadata]
+                                 ):
+    _metadata_cls: Type[TAttentionMetadata]
+
+    def __init__(self,
+                 input_builder: "ModelInputForGPUBuilder",
+                 group_id: Optional[int] = None,
+                 app_attn_metadata_builder: Optional[
+                     "AppAwareAttnMetadataBuilder"] = None):
+        self.input_builder = input_builder
+        self.group_id = group_id
+        self.block_size = input_builder.block_size
+        self.runner = input_builder.runner
+
+        self.slot_mapping: List[int] = []
+
+        self.num_prefills = 0
+        self.num_prefill_tokens = 0
+
+        self.mm_slot_mapping: List[int] = []
+        self.mm_token_ids: List[int] = []
+        self.multi_modal_inputs: List[MultiModalInputs] = []
+
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int):
+        for inter_data in self.input_builder.inter_data_list:
+            self._add_seq_group(inter_data)
+        device = self.runner.device
+        multi_modal_inputs = MultiModalInputs.batch(self.multi_modal_inputs)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
+        mm_slot_mapping_tensor = async_tensor_h2d(self.mm_slot_mapping,
+                                                  torch.long, device,
+                                                  self.runner.pin_memory)
+        mm_token_ids_tensor = async_tensor_h2d(self.mm_token_ids, torch.long,
+                                               device, self.runner.pin_memory)
+        return MMEmbeddingMetadata(
+            num_prefills=self.num_prefills,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=0,
+            slot_mapping=slot_mapping_tensor,
+            num_mm_prefills=len(self.multi_modal_inputs),
+            mm_slot_mapping=mm_slot_mapping_tensor,
+            mm_token_ids=mm_token_ids_tensor,
+            multi_modal_inputs=multi_modal_inputs,
+        )
+
+    def _add_seq_group(self, inter_data):
+        is_prompt = inter_data.is_prompt
+        block_tables = inter_data.block_tables
+        assert len(inter_data.seq_ids) == 1
+
+
+        seq_id, token_len, seq_len, curr_seq_len, query_len, context_len = \
+            inter_data.seq_ids[0], len(inter_data.input_tokens[0]), \
+            inter_data.orig_seq_lens[0], inter_data.seq_lens[0], \
+            inter_data.query_lens[0], inter_data.context_lens[0]
+
+        if is_prompt:
+            self.num_prefills += 1
+            self.num_prefill_tokens += token_len
+
+        multi_modal_inputs = inter_data.multi_modal_inputs
+        inter_data.multi_modal_inputs = None
+
+        is_profile_run = is_block_tables_empty(block_tables)
+        if block_tables is not None:
+            block_table = block_tables[seq_id][self.group_id]
+        else:
+            block_table = None
+        start_idx = 0
+
+        compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+                             seq_len, context_len, start_idx, self.block_size,
+                             block_table)
+
+        if context_len == 0:
+            # need to run vision encoder, compute mm_slot_mapping & mm_token_ids
+            token_ids = multi_modal_inputs['text']
+            compute_slot_mapping(is_profile_run, self.mm_slot_mapping, seq_id,
+                                 len(token_ids), context_len, start_idx,
+                                 self.block_size, block_table)
+            self.multi_modal_inputs.append(multi_modal_inputs)
+            self.mm_token_ids.extend(token_ids)
+
+
 class CommonAttentionState(AttentionState):
 
     def __init__(self, runner: "ModelRunnerBase"):
@@ -400,6 +510,7 @@ class CommonAttentionState(AttentionState):
                     "block_tables": attn.decode_metadata.block_tables,
                 }
                 for group_id, attn in attn_metadata.items()
+                if not isinstance(attn, MMEmbeddingMetadata)
             }
             if is_encoder_decoder_model:
                 raise NotImplementedError

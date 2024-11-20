@@ -143,6 +143,11 @@ class PerlayerBlockSpaceManager(BlockSpaceManager):
             block_id: block_tables[block_id].physical_block_ids_for_exec
             for block_id in block_tables
         }
+        kv_cache_config = self.custom_block_manager.kv_cache_config
+        for to_share_layer_id, group_id in kv_cache_config.kv_cache_sharing.items(
+        ):
+            block_ids[to_share_layer_id] = block_tables[
+                group_id].physical_block_ids  # not _for_exec
         return block_ids
 
     def get_num_free_gpu_blocks(self) -> int:

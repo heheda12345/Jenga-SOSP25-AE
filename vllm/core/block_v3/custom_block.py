@@ -469,3 +469,33 @@ class SlidingWindowManager(AppAwareManager):
 
     def get_block_size(self) -> int:
         return self.block_size
+
+
+class SharedBlockManager(AppAwareManager):
+
+    def __init__(self, cache_dtype: str, page_size: int,
+                 share_with_layer_ids: set[str]):
+        super().__init__(cache_dtype)
+        self.page_size = page_size
+        self.share_with_layer_ids = share_with_layer_ids
+
+    def get_page_size(self):
+        return self.page_size
+
+
+class VisionEmbeddingManager(SharedBlockManager):
+
+    def __init__(self, model_config: ModelConfig,
+                 parallel_config: ParallelConfig, cache_dtype: str,
+                 block_size: int, share_with_layer_ids: set[str]):
+        hidden_size = model_config.get_hidden_size()
+        super().__init__(get_dtype(cache_dtype, model_config),
+                         hidden_size * block_size, share_with_layer_ids)
+        self.hidden_size = hidden_size
+        self.block_size = block_size
+
+    def get_app_property(self) -> str:
+        return f"vision_embedding_{self.hidden_size}_{self.block_size}_{self.share_with_layer_ids}"
+
+    def get_block_size(self):
+        return self.block_size

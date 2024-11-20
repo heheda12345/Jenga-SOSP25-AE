@@ -140,6 +140,7 @@ def input_processor_for_siglip(
         placeholder_token_id=image_token_id,
         repeat_count=image_feature_size,
     )
+    multi_modal_data['text'] = new_token_ids
 
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(

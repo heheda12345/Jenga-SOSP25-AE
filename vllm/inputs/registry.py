@@ -237,6 +237,7 @@ class InputRegistry:
                     f"but found {len(num_tokens)} tokens instead.")
         if mm_data is not None:
             for k, v in mm_data.items():
+                if k == 'text': continue
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]
                 assert num_items >= num_expected, (

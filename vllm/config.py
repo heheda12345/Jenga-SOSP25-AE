@@ -674,6 +674,11 @@ class KVPageType(ComponentType):
     pass
 
 
+class SharedTokenType(ComponentType):
+    physical_token_shape: List[int]
+    view_token_shape: List[int]
+
+
 class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     # This config is built after the initialization of workers
     # so keep it out of CacheConfig
@@ -682,6 +687,7 @@ class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     level0_page_size: int
     components: Dict[str, ComponentType]  # layer_id -> ComponentType
     block_table_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
+    kv_cache_sharing: Dict[str, str]  # to_share_layer_id -> group_id
 
 
 @dataclass

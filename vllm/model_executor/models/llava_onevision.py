@@ -1,3 +1,4 @@
+import copy
 import math
 from functools import cached_property
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
@@ -14,7 +15,10 @@ from transformers.models.llava_onevision.modeling_llava_onevision import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.attention.backends.utils import MMEmbeddingMetadata
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.core.block_v3.custom_block import SelfAttentionManager, VisionEmbeddingManager
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -22,6 +26,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -45,6 +50,21 @@ MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
 _MAX_NUM_VIDEOS = 1
+
+
+def custom_block_manager_for_llava_onevision(model_config: ModelConfig,
+                                             cache_config: CacheConfig,
+                                             parallel_config: ParallelConfig):
+    custom_managers = {}
+    for i in range(model_config.get_num_layers(parallel_config)):
+        custom_managers[str(i)] = SelfAttentionManager(
+            model_config, parallel_config, cache_config.cache_dtype,
+            cache_config.block_size)
+    share_layer_ids = set(custom_managers.keys())
+    custom_managers["vision"] = VisionEmbeddingManager(
+        model_config, parallel_config, cache_config.cache_dtype,
+        cache_config.block_size, share_layer_ids)
+    return custom_managers
 
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
@@ -234,6 +254,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_video_for_clip(vision_config, num_frames=num_frames)
+        mm_data['text'] = seq_data.prompt_token_ids
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
@@ -245,6 +266,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_video_for_siglip(vision_config, num_frames=num_frames)
+        mm_data['text'] = seq_data.prompt_token_ids
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -413,6 +435,8 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     "video", get_max_llava_onevision_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_onevision)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_onevision)
+@BLOCK_MANAGER_REGISTRY.register_block_manager(
+    custom_block_manager_for_llava_onevision)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
@@ -826,22 +850,56 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             input_ids = None
             inputs_embeds = None
         else:
-            modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
-            if modalities:
+            vision_metadata = attn_metadata['vision']
+            assert isinstance(vision_metadata, MMEmbeddingMetadata)
+            if vision_metadata.num_mm_prefills > 0:
+                # run vision encoder
+                vision_kwargs = MultiModalInputs.as_kwargs(
+                    vision_metadata.multi_modal_inputs,
+                    device=input_ids.device)
+                modalities = self._parse_and_validate_multimodal_inputs(
+                    **vision_kwargs)
+                mm_input_ids = vision_metadata.mm_token_ids
                 inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                    mm_input_ids)
                 if "images" in modalities:
                     image_input = modalities["images"]
                     vision_embeddings = self._process_image_input(image_input)
                     inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, vision_embeddings,
+                        mm_input_ids, inputs_embeds, vision_embeddings,
                         self.config.image_token_index)
                 if "videos" in modalities:
                     video_input = modalities["videos"]
                     video_embeddings = self._process_video_pixels(video_input)
                     inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, video_embeddings,
+                        mm_input_ids, inputs_embeds, video_embeddings,
                         self.config.video_token_index)
+                # TODO: no need to save tokens in this step into kv_caches
+                if kv_caches['vision'].numel() > 0:
+                    kv_caches['vision'][
+                        vision_metadata.mm_slot_mapping, :inputs_embeds.
+                        shape[-1]] = inputs_embeds
+
+            if vision_metadata.num_prefills > 0:
+                # fetch prefill embeddings from kv_caches and run decode embeddings
+                num_prefill_tokens = vision_metadata.num_prefill_tokens
+                prefill_slots = vision_metadata.slot_mapping[:
+                                                             num_prefill_tokens]
+                hidden_size = self.config.text_config.hidden_size
+                if kv_caches['vision'].numel() == 0:
+                    # dummy embedding for profile run
+                    prefill_embeds = torch.ones(
+                        (num_prefill_tokens, hidden_size),
+                        dtype=kv_caches['vision'].dtype,
+                        device=input_ids.device)
+                else:
+                    # fetch prefill embeddings from kv_caches
+                    prefill_embeds = kv_caches['vision'][
+                        prefill_slots, :hidden_size]
+                decode_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids[num_prefill_tokens:])
+                inputs_embeds = torch.cat((prefill_embeds, decode_embeds),
+                                          dim=0)
                 input_ids = None
             else:
                 inputs_embeds = None

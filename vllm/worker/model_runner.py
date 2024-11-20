@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionMetadataBuilder
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
-from vllm.attention.backends.utils import CommonAttentionState
+from vllm.attention.backends.utils import CommonAttentionState, MMEmbeddingMetadata, MMEmbeddingMetadataBuilder
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.levels import CompilationLevel
 from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
@@ -27,7 +27,7 @@ from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.core.block_v3.registry import BlockManagerRegistry, BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder
+from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder, VisionEmbeddingManager
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -455,12 +455,20 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata inputs.
         if self.scheduler_config.use_per_layer_block_manager:
-            self.attn_metadata_builders = {
-                group_id: self.attn_backend.make_metadata_builder(
-                    weakref.proxy(self), group_id,
-                    app_attn_metadata_builders[group_id])
-                for group_id in app_attn_metadata_builders
-            }
+            self.attn_metadata_builders = {}
+            for group_id, app_attn_metadata_builder in app_attn_metadata_builders.items(
+            ):
+                if isinstance(app_attn_metadata_builder,
+                              VisionEmbeddingManager):
+                    self.attn_metadata_builders[
+                        group_id] = MMEmbeddingMetadataBuilder(
+                            weakref.proxy(self), group_id,
+                            app_attn_metadata_builder)
+                else:
+                    self.attn_metadata_builders[
+                        group_id] = self.attn_backend.make_metadata_builder(
+                            weakref.proxy(self), group_id,
+                            app_attn_metadata_builder)
         else:
             self.attn_metadata_builders = {
                 "0":
@@ -899,6 +907,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 kv_cache_config.block_table_sharing.items()
                 for layer_id in layer_ids
             }
+            attn_metadata |= {
+                layer_id: attn_metadata_groups[layer_id]
+                for layer_id in kv_cache_config.kv_cache_sharing.keys()
+            }
 
         else:
             unified_attn_metadata = self.attn_metadata_builders["0"].build(
@@ -1113,6 +1125,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 group_id: app_attn_metadata_builders[layer_ids[0]]
                 for group_id, layer_ids in
                 kv_cache_config.block_table_sharing.items()
+            }
+            self.app_attn_metadata_builders |= {
+                layer_id: app_attn_metadata_builders[layer_id]
+                for layer_id in kv_cache_config.kv_cache_sharing.keys()
             }
 
     def set_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
@@ -1361,6 +1377,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     kv_cache_config.block_table_sharing.values()
                     for layer_id in layer_ids
                 }
+                kv_caches |= {
+                    layer_id: torch.tensor([],
+                                           dtype=kv_cache_config.buffer_dtype,
+                                           device=self.device)
+                    for layer_id in kv_cache_config.kv_cache_sharing.keys()
+                }
             else:
                 kv_caches = {
                     str(layer_id): torch.tensor([],
@@ -1546,7 +1568,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                 is_encoder_decoder_model,
                                 group_id=group_id)
                             for group_id in
-                            self.app_attn_metadata_builders.keys()
+                            self.kv_cache_config.block_table_sharing.keys()
+                        }
+                        attn_metadata |= {
+                            layer_id: MMEmbeddingMetadata.for_capture()
+                            for layer_id in
+                            self.kv_cache_config.kv_cache_sharing.keys()
                         }
                         block_table_sharing = self.kv_cache_config.block_table_sharing
                     else:
@@ -1586,7 +1613,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
                         self.model_config.is_encoder_decoder_model,
-                        block_table_sharing)
+                        self.kv_cache_config)
                     capture_inputs = {
                         "input_ids":
                         input_tokens[:batch_size],
@@ -1878,7 +1905,7 @@ class CUDAGraphRunner:
 
     def __init__(self, model: nn.Module, backend_name: str,
                  attn_state: AttentionState, is_encoder_decoder_model: bool,
-                 block_table_sharing: Dict[str, List[str]]):
+                 kv_cache_config: KVCacheConfig):
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1888,7 +1915,7 @@ class CUDAGraphRunner:
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
         self._is_encoder_decoder_model = is_encoder_decoder_model
-        self.block_table_sharing = block_table_sharing
+        self.kv_cache_config = kv_cache_config
 
     @property
     def graph(self):
@@ -1913,11 +1940,16 @@ class CUDAGraphRunner:
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         # Note one iteration is not enough for torch.jit.script
-        if len(self.block_table_sharing) > 0:
+        if len(self.kv_cache_config.block_table_sharing) > 0:
             attn_metadata_for_exec = {
                 layer_id: attn_metadata[group_id]
-                for group_id, layer_ids in self.block_table_sharing.items()
+                for group_id, layer_ids in
+                self.kv_cache_config.block_table_sharing.items()
                 for layer_id in layer_ids
+            }
+            attn_metadata_for_exec |= {
+                layer_id: attn_metadata[layer_id]
+                for layer_id in self.kv_cache_config.kv_cache_sharing.keys()
             }
         else:
             attn_metadata_for_exec = attn_metadata

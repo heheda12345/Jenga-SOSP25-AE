@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import torch
 
 from vllm.attention import get_attn_backend
-from vllm.config import CacheConfig, DeviceConfig, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, DeviceConfig, KVCacheConfig, KVPageType, ModelConfig, ParallelConfig, SharedTokenType
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, TORCH_DTYPE_TO_STR_DTYPE,
                         get_dtype_size, is_pin_memory_available)
@@ -208,6 +208,15 @@ class CacheEngineV3:
                                      half_page_size +
                                      component.num_elements].view(shape)
                     kv_cache[layer_id] = (k_cache, v_cache)
+            elif isinstance(component, SharedTokenType):
+                assert component.page_size == reduce(
+                    operator.mul,
+                    component.physical_token_shape) * self.block_size
+                shape = (component.num_elements // component.page_size *
+                         self.block_size, *component.physical_token_shape)
+                kv_cache[layer_id] = buffer[component.
+                                            start_bias:component.start_bias +
+                                            component.num_elements].view(shape)
             else:
                 kv_cache[layer_id] = buffer[component.start_bias:component.
                                             end_bias]
