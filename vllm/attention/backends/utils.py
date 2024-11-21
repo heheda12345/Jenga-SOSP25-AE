@@ -417,8 +417,8 @@ class MMEmbeddingMetadataBuilder(AttentionMetadataBuilder[MMEmbeddingMetadata]
             # need to run vision encoder, compute mm_slot_mapping & mm_token_ids
             token_ids = multi_modal_inputs['text']
             compute_slot_mapping(is_profile_run, self.mm_slot_mapping, seq_id,
-                                 len(token_ids), context_len, start_idx,
-                                 self.block_size, block_table)
+                                 len(token_ids), 0, start_idx, self.block_size,
+                                 block_table)
             self.multi_modal_inputs.append(multi_modal_inputs)
             self.mm_token_ids.extend(token_ids)
 
