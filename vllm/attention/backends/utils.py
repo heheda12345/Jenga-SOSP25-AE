@@ -439,6 +439,7 @@ class LAMetadata(AttentionMetadata):
     need_final_copy: bool
     to_mutable_src: torch.Tensor
     to_mutable_dst: torch.Tensor
+    is_profile_run: bool
 
 
 class LAMetadataBuilder(CommonMetadataBuilder):
@@ -469,6 +470,7 @@ class LAMetadataBuilder(CommonMetadataBuilder):
         self.to_mutable_src: List[int] = []
         self.to_mutable_dst: List[int] = []
         self.num_tokens = 0
+        self.is_profile_run = False
 
     def build(self, seq_lens: List[int], query_lens: List[int],
               cuda_graph_pad_size: int, batch_size: int):
@@ -521,6 +523,7 @@ class LAMetadataBuilder(CommonMetadataBuilder):
                                             device, self.runner.pin_memory),
             to_mutable_dst=async_tensor_h2d(self.to_mutable_dst, torch.int,
                                             device, self.runner.pin_memory),
+            is_profile_run=self.is_profile_run,
         )
 
     def _add_seq_group(
@@ -542,26 +545,31 @@ class LAMetadataBuilder(CommonMetadataBuilder):
         else:
             # profile run
             block_table = None
+            self.is_profile_run = True
 
         if is_prompt:
+            assert context_len % self.chunk_size == 0
             for i, start_positon in enumerate(
-                    range(0, seq_len, self.chunk_size)):
+                    range(context_len, seq_len, self.chunk_size)):
                 end_position = min(start_positon + self.chunk_size, seq_len)
                 if len(self.steps) <= i:
                     self.steps.append(
                         LAMetadataBuilder.Step([], [], [], [], [], []))
                 step = self.steps[i]
                 step.query_start_loc.append(len(step.query_start_loc))
-                step.token_positions.extend(range(start_positon, end_position))
+                step.token_positions.extend(
+                    range(start_positon - context_len,
+                          end_position - context_len))
+                block_table_idx = start_positon // self.chunk_size
                 if block_table is not None:
-                    step.cache_indices.append(block_table[i])
+                    step.cache_indices.append(block_table[block_table_idx])
                 else:
                     step.cache_indices.append(0)
-                assert context_len == 0
                 step.context_lens_tensor.append(start_positon)
-                if i > 0 and block_table is not None:
-                    step.prev_block_table.append(block_table[i - 1])
-                    step.curr_block_table.append(block_table[i])
+                if block_table_idx > 0 and block_table is not None:
+                    step.prev_block_table.append(block_table[block_table_idx -
+                                                             1])
+                    step.curr_block_table.append(block_table[block_table_idx])
             if seq_len % self.chunk_size == 0 and block_table is not None:
                 self.need_final_copy = True
                 self.to_mutable_src.append(block_table[-2])

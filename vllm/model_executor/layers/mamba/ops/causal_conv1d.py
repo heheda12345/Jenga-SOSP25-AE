@@ -88,10 +88,14 @@ def causal_conv1d_fn_with_cache(x: torch.Tensor,
     for step in conv_metadata.steps:
         x_step = x[step.token_positions].transpose(-2, -1).contiguous()
         conv_cache[step.curr_block_table] = conv_cache[step.prev_block_table]
-        out = ops.causal_conv1d_fwd(x_step, weight, bias, conv_cache,
-                                    step.query_start_loc, step.cache_indices,
-                                    step.context_lens_tensor > 0, activation
-                                    in ["silu", "swish"])
+        if not conv_metadata.is_profile_run:
+            out = ops.causal_conv1d_fwd(x_step, weight, bias, conv_cache,
+                                        step.query_start_loc,
+                                        step.cache_indices,
+                                        step.context_lens_tensor > 0,
+                                        activation in ["silu", "swish"])
+        else:
+            out = torch.empty_like(x_step)
         out_tensor[step.token_positions] = out.transpose(-2, -1)
     # ensure the last block is mutable
     if conv_metadata.need_final_copy:

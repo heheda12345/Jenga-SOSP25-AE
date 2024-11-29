@@ -547,9 +547,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         lora_config: Optional[LoRAConfig] = None,
         scheduler_config: Optional[SchedulerConfig] = None,
     ) -> None:
-        assert not cache_config.enable_prefix_caching, \
-            "Jamba currently does not support prefix caching"
-
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config

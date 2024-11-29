@@ -474,11 +474,11 @@ def selective_scan_fn_with_cache(
         z_step = z[step.token_positions].transpose(-2, -1).contiguous()
 
         ssm_cache[step.curr_block_table] = ssm_cache[step.prev_block_table]
-
-        ops.selective_scan_fwd(u_step, delta_step, A, B_step, C_step, D,
-                               z_step, delta_bias, delta_softplus,
-                               step.query_start_loc, step.cache_indices,
-                               step.context_lens_tensor > 0, ssm_cache)
+        if not ssm_metadata.is_profile_run:
+            ops.selective_scan_fwd(u_step, delta_step, A, B_step, C_step, D,
+                                   z_step, delta_bias, delta_softplus,
+                                   step.query_start_loc, step.cache_indices,
+                                   step.context_lens_tensor > 0, ssm_cache)
         out_tensor[step.token_positions] = z_step.transpose(-2, -1)
 
     # ensure the last block is mutable
