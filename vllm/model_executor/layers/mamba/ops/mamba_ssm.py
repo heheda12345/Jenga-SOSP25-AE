@@ -9,6 +9,7 @@ import triton.language as tl
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.attention.backends.utils import LAMetadata
 
 TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
 
@@ -393,3 +394,95 @@ def selective_scan_fn(
         return delta  # output written inplace to delta
     else:
         return z  # output written inplace to z
+
+
+def selective_scan_fn_with_cache(
+        u, ssm_cache, delta, A, B, C, D, z, delta_bias, delta_softplus,
+        ssm_metadata: LAMetadata) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    u: (total_length, dim)
+    delta: (total_length, dim)
+    A: (dim, dstate) 
+    B: (ngroups, total_length, dstate) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    C: (ngroups, total_length, dstate) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    D: (dim,) 
+    z: (total_length, dim) for varlen or (batch, dim, seqlen) 
+    dt_bias: (dim,) or (dim)
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended with 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
+        x.shape=(dim,17)
+    cache_indices: (batch) int32
+        A tensor with each cell is a correspondent 
+        input and output ssm_state index
+    has_initial_state: (batch) bool
+        A tensor populated with ones and zeros, 
+        indicate if the ssm_state at the corresponding index should be 
+        used as initial state. Not providing argument assumes 
+        there's no initial state
+
+    returns
+        output: (total_length, dim) for varlen or (batch, dim, seqlen) 
+                supports inplace replacement
+        last_state has shape (batch, dim, dstate). 
+                supports inplace replacement if ssm_state was provided
+    """
+    assert z is not None
+    if ssm_metadata.num_prefills == 0:
+        # only decode, need to be cuda-graph capture-able
+        u = u.transpose(-2, -1)
+        delta = delta.transpose(-2, -1)
+        B = B.transpose(-2, -1)
+        C = C.transpose(-2, -1)
+        z = z.transpose(-2, -1)
+
+        if u.stride(-1) != 1:
+            u = u.contiguous()
+        if delta.stride(-1) != 1:
+            delta = delta.contiguous()
+        if D is not None:
+            D = D.contiguous()
+        if B.stride(-1) != 1:
+            B = B.contiguous()
+        if C.stride(-1) != 1:
+            C = C.contiguous()
+        if z.stride(-1) != 1:
+            z = z.contiguous()
+        B = B.unsqueeze(0)
+        C = C.unsqueeze(0)
+
+        decode_metadata = ssm_metadata.steps[0]
+
+        ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
+                               delta_softplus, decode_metadata.query_start_loc,
+                               decode_metadata.cache_indices,
+                               decode_metadata.context_lens_tensor > 0,
+                               ssm_cache)
+        return z.transpose(-2, -1)  # output written inplace to z
+
+    out_tensor = torch.empty_like(z)
+    for step in ssm_metadata.steps:
+        u_step = u[step.token_positions].transpose(-2, -1).contiguous()
+        delta_step = delta[step.token_positions].transpose(-2, -1).contiguous()
+        B_step = B[step.token_positions].transpose(
+            -2, -1).contiguous().unsqueeze(0)
+        C_step = C[step.token_positions].transpose(
+            -2, -1).contiguous().unsqueeze(0)
+        z_step = z[step.token_positions].transpose(-2, -1).contiguous()
+
+        ssm_cache[step.curr_block_table] = ssm_cache[step.prev_block_table]
+
+        ops.selective_scan_fwd(u_step, delta_step, A, B_step, C_step, D,
+                               z_step, delta_bias, delta_softplus,
+                               step.query_start_loc, step.cache_indices,
+                               step.context_lens_tensor > 0, ssm_cache)
+        out_tensor[step.token_positions] = z_step.transpose(-2, -1)
+
+    # ensure the last block is mutable
+    if ssm_metadata.need_final_copy:
+        ssm_cache[ssm_metadata.to_mutable_dst] = ssm_cache[
+            ssm_metadata.to_mutable_src]
+    return out_tensor

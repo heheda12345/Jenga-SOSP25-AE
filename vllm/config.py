@@ -592,6 +592,7 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
         enable_layer_grouping: bool = True,
+        linear_chunk_size: int = 512,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -602,6 +603,7 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self.enable_layer_grouping = enable_layer_grouping
+        self.linear_chunk_size = linear_chunk_size
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -677,6 +679,10 @@ class KVPageType(ComponentType):
 class SharedTokenType(ComponentType):
     physical_token_shape: List[int]
     view_token_shape: List[int]
+
+
+class LAPageType(ComponentType):
+    page_shape: List[int]
 
 
 class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):

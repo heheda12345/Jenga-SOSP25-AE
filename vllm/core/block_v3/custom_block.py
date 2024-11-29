@@ -1,6 +1,8 @@
 # Import methods in this file to configure per-layer block table
 from abc import abstractmethod
+from functools import reduce
 import math
+import operator
 from typing import List, Protocol, Dict, Any, Tuple, Type, TYPE_CHECKING
 import torch
 from typing_extensions import TypeVar
@@ -469,6 +471,157 @@ class SlidingWindowManager(AppAwareManager):
 
     def get_block_size(self) -> int:
         return self.block_size
+
+
+class LinearAttentionManager(AppAwareManager):
+
+    def __init__(self, model_config: ModelConfig,
+                 parallel_config: ParallelConfig, cache_dtype: str,
+                 chunk_size: int, state_shape: List[int]):
+        super().__init__(get_dtype(cache_dtype, model_config))
+        self.state_shape = state_shape
+        self.state_numel = reduce(operator.mul, state_shape)
+        self.chunk_size = chunk_size
+
+    def get_page_size(self):
+        return self.state_numel
+
+    def get_app_property(self):
+        return f"linear_attention_{self.state_numel}"
+
+    def get_num_required_blocks(self,
+                                seq_group: SequenceGroup,
+                                num_lookahead_slots: int = 0) -> int:
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        num_tokens = len(seq.get_token_ids())
+        # assume chunk size 4
+        # prefill_pos=0123456,len=7   [3][decode state] <no need to copy>
+        # prefill_pos=01234567,len=8  [3][7][decode state] <copy at prefill>
+        # prefill_pos=012345678,len=9 [3][7][decode state] <no need to ocpy>
+        num_required_blocks = (num_tokens +
+                               num_lookahead_slots) // self.chunk_size + 1
+        return num_required_blocks
+
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str) -> BlockTable:
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        block_table = BlockTable(block_size=self.chunk_size,
+                                 block_allocator=block_allocator,
+                                 max_block_sliding_window=-1,
+                                 group_id=group_id,
+                                 seq_id=seq.seq_id)
+        token_ids = seq.get_token_ids()
+        device = Device.GPU
+        blocks: List[Block] = []
+
+        block_token_ids = []
+        tail_token_ids = []
+        for cur_token_ids in chunk_list(token_ids, self.chunk_size):
+            if len(cur_token_ids) == self.chunk_size:
+                block_token_ids.append(cur_token_ids)
+            else:
+                tail_token_ids.append(cur_token_ids)
+        if len(tail_token_ids) == 0:
+            tail_token_ids.append([])
+
+        prev_block = None
+        if block_token_ids:
+            blocks.extend(
+                block_allocator.allocate_immutable_blocks(
+                    prev_block,
+                    block_token_ids=block_token_ids,
+                    group_id_hash=block_table._group_id_hash,
+                    seq_id=block_table._seq_id,
+                    device=device))
+            prev_block = blocks[-1]
+
+        if tail_token_ids:
+            assert len(tail_token_ids) == 1
+            cur_token_ids = tail_token_ids[0]
+
+            block = block_allocator.allocate_mutable_block(
+                prev_block=prev_block,
+                device=device,
+                group_id_hash=block_table._group_id_hash,
+                seq_id=block_table._seq_id)
+            block.append_token_ids(cur_token_ids)
+            blocks.append(block)
+
+        block_table.update(blocks)
+        block_table._num_full_slots = len(token_ids)
+
+        block_table.free_start = 0
+        return block_table
+
+    def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
+                                               block_table: BlockTable,
+                                               num_lookahead_slots: int):
+        return 0
+
+    def append_token_ids(self, seq: Sequence, block_table: BlockTable,
+                         num_lookahead_slots: int):
+        # save all generated tokens in the last block,
+        pass
+
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        num_computed_slots = seq.data.get_num_computed_tokens()
+        null_block = block_table._allocator.allocate_or_get_null_block()
+        assert num_computed_slots is not None
+        end_block_idx = len(block_table._blocks) - 3
+        end_block_idx = max(end_block_idx, 0)
+        # if block_table.free_start < end_block_idx:
+        #     print("free_skipped_blocks", block_table.free_start, end_block_idx)
+        if block_table._allocator.allocator_type == "prefix_caching":
+            last_access_blocks_tracker.update_seq_blocks_last_access(
+                block_table._seq_id, [
+                    b.block_id for b in
+                    block_table._blocks[block_table.free_start:end_block_idx]
+                    if b is not null_block
+                ], self.group_id, -200)
+        for idx in range(block_table.free_start, end_block_idx):
+            b = block_table._blocks[idx]
+            if b is not null_block:
+                block_table._allocator.free(b)
+                block_table._blocks[idx] = null_block
+        block_table.free_start = end_block_idx
+
+    def get_prefix_cache_alignment(self) -> int:
+        return self.chunk_size
+
+    def get_possible_hit_lens(
+            self, block_is_computed: List[bool]) -> List[Tuple[int, int]]:
+        assert block_is_computed[-1] is False
+        start = 0
+        ranges = []
+        for i, is_computed in enumerate(block_is_computed):
+            if not is_computed:
+                ranges.append((start * self.chunk_size, i * self.chunk_size))
+                start = i + 1
+        return ranges
+
+    def filter_computed_blocks_by_token(
+            self, computed_tokens: int, block_table: BlockTable,
+            block_allocator: DeviceAwareBlockAllocator):
+        assert computed_tokens % self.chunk_size == 0
+        num_blocks = computed_tokens // self.chunk_size
+
+        suffix_to_mutable_block(block_table, block_allocator, num_blocks)
+        # 1 is a magic number to make the touched range a little larger
+        prefix_to_null_block(block_table, block_allocator, num_blocks -
+                             2)  # TODO: -1 here for run test EVAL_EVAL -2
+        return block_table.physical_block_ids[:num_blocks]
+
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        last_access_blocks_tracker.update_seq_blocks_last_access(
+            seq.seq_id, block_table.physical_block_ids, self.group_id)
+
+    def get_block_size(self) -> int:
+        return self.chunk_size
 
 
 class SharedBlockManager(AppAwareManager):

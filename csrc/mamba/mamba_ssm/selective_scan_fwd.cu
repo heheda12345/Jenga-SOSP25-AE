@@ -626,7 +626,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(ssm_states.scalar_type() == input_type);
     TORCH_CHECK(ssm_states.is_cuda());
     TORCH_CHECK(ssm_states.stride(-1) == 1);
-    CHECK_SHAPE(ssm_states, batch_size, dim, dstate);
+    // CHECK_SHAPE(ssm_states, batch_size, dim, dstate);
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,

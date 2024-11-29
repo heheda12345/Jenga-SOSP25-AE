@@ -1,6 +1,8 @@
 # coding=utf-8
 """Inference-only Jamba model."""
 from dataclasses import dataclass
+from functools import reduce
+import operator
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -8,8 +10,11 @@ from torch import nn
 from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.utils import LAMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig, SchedulerConfig
+from vllm.core.block_v3.custom_block import LinearAttentionManager, SelfAttentionManager
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -19,10 +24,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn, causal_conv1d_update)
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn_with_cache
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    selective_scan_fn, selective_state_update)
+    selective_scan_fn, selective_scan_fn_with_cache, selective_state_update)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -39,6 +43,43 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
 from .interfaces import HasInnerState, SupportsLoRA
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
+
+def custom_block_manager_for_jamba(model_config: ModelConfig,
+                                   cache_config: CacheConfig,
+                                   parallel_config: ParallelConfig):
+
+    def _get_mamba_cache_shape(hf_config: JambaConfig) -> List[List[int]]:
+        world_size = 1  # TODO: support TP here
+        hidden_size = hf_config.hidden_size
+        conv_state_shape = (
+            hf_config.mamba_expand * hidden_size // world_size,
+            hf_config.mamba_d_conv - 1,
+        )
+        ssm_shape = (
+            hf_config.mamba_expand * hidden_size // world_size,
+            hf_config.mamba_d_state,
+        )
+        return [conv_state_shape, ssm_shape]
+
+    custom_managers = {}
+    config = model_config.hf_config
+    conv_shape, ssm_shape = _get_mamba_cache_shape(config)
+
+    for i in range(config.num_hidden_layers):
+        if config.layers_block_type[i] == "mamba":
+            custom_managers[str(i) + '-conv'] = LinearAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.linear_chunk_size, conv_shape)
+            custom_managers[str(i) + '-ssm'] = LinearAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.linear_chunk_size, ssm_shape)
+        else:
+            custom_managers[str(i)] = SelfAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
+
+    return custom_managers
 
 
 @dataclass
@@ -128,47 +169,33 @@ class JambaMambaMixer(nn.Module):
         self.c_layernorm = RMSNorm(self.ssm_state_size,
                                    eps=config.rms_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor,
-                attn_metadata: AttentionMetadata, conv_state: torch.Tensor,
-                ssm_state: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, conv_cache: torch.Tensor,
+                ssm_cache: torch.Tensor, conv_metadata: LAMetadata,
+                ssm_metadata: LAMetadata):
 
         # 1. Gated MLP's linear projection
-        projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
-        hidden_states, gate = projected_states.chunk(2, dim=-2)
+        projected_states = self.in_proj(hidden_states)[0]
+        hidden_states, gate = projected_states.chunk(2, dim=-1)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
-            # |---------- N-1 iteration --------|
-            # |---------------- N iteration ---------------------|
-            # |- tokenA -|......................|-- newTokens ---|
-            # |---------- context_len ----------|
-            # |-------------------- seq_len ---------------------|
-            #                                   |-- query_len ---|
-            hidden_states = causal_conv1d_fn(
-                hidden_states,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            hidden_states = causal_conv1d_update(
-                hidden_states.transpose(0, 1),
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-            )
-            hidden_states = hidden_states.transpose(0, 1)
+        assert isinstance(conv_metadata, LAMetadata)
+        assert isinstance(ssm_metadata, LAMetadata)
+
+        hidden_states = causal_conv1d_fn_with_cache(
+            hidden_states,
+            conv_weights,
+            self.conv1d.bias,
+            activation=self.activation,
+            conv_cache=conv_cache,
+            conv_metadata=conv_metadata,
+        )
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
+        ssm_parameters = self.x_proj(hidden_states)[0]  # (total_length, dim)
 
         time_step, B, C = torch.split(
             ssm_parameters,
@@ -179,44 +206,26 @@ class JambaMambaMixer(nn.Module):
         B = self.b_layernorm(B.contiguous())
         C = self.c_layernorm(C.contiguous())
 
-        discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
+        discrete_time_step = self.dt_proj(time_step)[0]
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
             self.dt_proj, "bias") else None)
 
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
-            scan_outputs = selective_scan_fn(
-                hidden_states,
-                ssm_state,
-                discrete_time_step,
-                self.A,
-                B.transpose(-2, -1),
-                C.transpose(-2, -1),
-                self.D.float(),
-                gate,
-                time_proj_bias,
-                delta_softplus=True,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            scan_outputs = selective_state_update(
-                ssm_state,
-                hidden_states.transpose(0, 1),
-                discrete_time_step.transpose(0, 1),
-                self.A,
-                B,
-                C,
-                self.D,
-                gate.transpose(0, 1),
-                time_proj_bias,
-                dt_softplus=True,
-            )
-            scan_outputs = scan_outputs.transpose(0, 1)
+        scan_outputs = selective_scan_fn_with_cache(
+            hidden_states,  # (total_length, dim)
+            ssm_cache,
+            discrete_time_step,  # (total_length, dim)
+            self.A,
+            B,  # (ngroups, total_length, dstate)
+            C,  # (ngroups, total_length, dstate)
+            self.D.float(),
+            gate,  # (total_length, dim)
+            time_proj_bias,  # delta_bias
+            delta_softplus=True,
+            ssm_metadata=ssm_metadata)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
-                                                                     -1))[0]
+        contextualized_states = self.out_proj(scan_outputs)[0]
         return contextualized_states
 
 
@@ -302,15 +311,10 @@ class JambaMambaDecoderLayer(nn.Module):
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
                                         eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-        **kwargs,
-    ):
+    def forward(self, hidden_states: torch.Tensor,
+                residual: Optional[torch.Tensor], conv_cache: torch.Tensor,
+                ssm_cache: torch.Tensor, conv_metadata: LAMetadata,
+                ssm_metadata: LAMetadata):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -318,8 +322,8 @@ class JambaMambaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, attn_metadata, conv_state,
-                                   ssm_state)
+        hidden_states = self.mamba(hidden_states, conv_cache, ssm_cache,
+                                   conv_metadata, ssm_metadata)
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
             hidden_states, residual)
@@ -392,11 +396,17 @@ class JambaAttentionDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        layer_id: str,
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
+                                layer_id=layer_id)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -407,7 +417,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-        **kwargs,
+        layer_id: str,
     ):
         if residual is None:
             residual = hidden_states
@@ -421,6 +431,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            layer_id=layer_id,
         )
         # Fully Connected
         hidden_states, residual = self.pre_ff_layernorm(
@@ -476,40 +487,36 @@ class JambaModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            kv_cache = None
-            current_ssm_state = None
-            current_conv_state = None
-            if isinstance(layer, JambaAttentionDecoderLayer):
-                kv_cache = kv_caches[(i - self.config.attn_layer_offset) //
-                                     self.config.attn_layer_period]
-            if isinstance(layer, JambaMambaDecoderLayer):
-                current_state_layer = i - (1 +
-                                           (i - self.config.attn_layer_offset)
-                                           // self.config.attn_layer_period)
-                current_ssm_state = ssm_state[current_state_layer]
-                current_conv_state = conv_state[current_state_layer]
 
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                residual=residual,
-                conv_state=current_conv_state,
-                ssm_state=current_ssm_state,
-            )
+            if isinstance(layer, JambaAttentionDecoderLayer):
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    kv_cache=kv_caches[str(i)],
+                    attn_metadata=attn_metadata[str(i)],
+                    residual=residual,
+                    layer_id=str(i),
+                )
+            else:
+                hidden_states, residual = layer(
+                    hidden_states=hidden_states,
+                    residual=residual,
+                    conv_cache=kv_caches[str(i) + '-conv'],
+                    ssm_cache=kv_caches[str(i) + '-ssm'],
+                    conv_metadata=attn_metadata[str(i) + '-conv'],
+                    ssm_metadata=attn_metadata[str(i) + '-ssm'],
+                )
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
 
 
+@BLOCK_MANAGER_REGISTRY.register_block_manager(custom_block_manager_for_jamba)
 class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -576,25 +583,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs):
-        if self.mamba_cache is None:
-            max_batch_size = (_get_graph_batch_size(
-                self.scheduler_config.max_num_seqs) if self.scheduler_config
-                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
-
-            layers_type = self.config.layers_block_type
-            num_mamba_layers = sum(
-                [layer_type == "mamba" for layer_type in layers_type])
-
-            self.mamba_cache = MambaCacheManager(
-                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
-                *self._get_mamba_cache_shape())
-
-        mamba_cache_tensors = self.mamba_cache.current_run_tensors(
-            input_ids, attn_metadata, **kwargs)
-
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache_tensors[0],
-                                   mamba_cache_tensors[1])
+                                   attn_metadata)
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):

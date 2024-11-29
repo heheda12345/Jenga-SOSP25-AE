@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionMetadataBuilder
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
-from vllm.attention.backends.utils import CommonAttentionState, MMEmbeddingMetadata, MMEmbeddingMetadataBuilder
+from vllm.attention.backends.utils import CommonAttentionState, LAMetadataBuilder, MMEmbeddingMetadata, MMEmbeddingMetadataBuilder
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.levels import CompilationLevel
 from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
@@ -27,7 +27,7 @@ from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.core.block_v3.registry import BlockManagerRegistry, BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder, VisionEmbeddingManager
+from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder, LinearAttentionManager, VisionEmbeddingManager
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -464,6 +464,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         group_id] = MMEmbeddingMetadataBuilder(
                             weakref.proxy(self), group_id,
                             app_attn_metadata_builder)
+                elif isinstance(app_attn_metadata_builder,
+                                LinearAttentionManager):
+                    self.attn_metadata_builders[group_id] = LAMetadataBuilder(
+                        weakref.proxy(self), group_id,
+                        app_attn_metadata_builder)
                 else:
                     self.attn_metadata_builders[
                         group_id] = self.attn_backend.make_metadata_builder(
@@ -892,13 +897,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Attention metadata.
         if self.scheduler_config.use_per_layer_block_manager:
             # Run per-layer build here
-            attn_metadata_groups = {
-                group_id:
-                attn_metadata_builder.build(seq_lens, query_lens,
-                                            cuda_graph_pad_size, batch_size)
-                for group_id, attn_metadata_builder in
-                self.attn_metadata_builders.items()
-            }
+            attn_metadata_groups = {}
+            for group_id, attn_metadata_builder in self.attn_metadata_builders.items(
+            ):
+                attn_metadata_groups[group_id] = attn_metadata_builder.build(
+                    seq_lens, query_lens, cuda_graph_pad_size, batch_size)
             kv_cache_config = self.runner.kv_cache_config
             assert kv_cache_config is not None
             attn_metadata = {

@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
+from vllm.core.block_v3.custom_block import LinearAttentionManager
 from vllm.core.interfaces import BLOCK_IDS
 from vllm.multimodal.base import MultiModalInputs, BatchedTensorInputs
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -389,7 +390,6 @@ class MMEmbeddingMetadataBuilder(AttentionMetadataBuilder[MMEmbeddingMetadata]
         block_tables = inter_data.block_tables
         assert len(inter_data.seq_ids) == 1
 
-
         seq_id, token_len, seq_len, curr_seq_len, query_len, context_len = \
             inter_data.seq_ids[0], len(inter_data.input_tokens[0]), \
             inter_data.orig_seq_lens[0], inter_data.seq_lens[0], \
@@ -421,6 +421,165 @@ class MMEmbeddingMetadataBuilder(AttentionMetadataBuilder[MMEmbeddingMetadata]
                                  block_table)
             self.multi_modal_inputs.append(multi_modal_inputs)
             self.mm_token_ids.extend(token_ids)
+
+
+@dataclass
+class LAMetadata(AttentionMetadata):
+
+    @dataclass
+    class Step:
+        token_positions: torch.Tensor  # the index of the tokens in input_ids
+        query_start_loc: torch.Tensor  # the start location in token_positions
+        cache_indices: torch.Tensor  # the cache indices
+        context_lens_tensor: torch.Tensor
+        prev_block_table: torch.Tensor  # the block table of the previous step
+        curr_block_table: torch.Tensor  # the block table of the current step
+
+    steps: List[Step]
+    need_final_copy: bool
+    to_mutable_src: torch.Tensor
+    to_mutable_dst: torch.Tensor
+
+
+class LAMetadataBuilder(CommonMetadataBuilder):
+    _metadata_cls = AttentionMetadata
+
+    @dataclass
+    class Step:
+        token_positions: List[int]
+        query_start_loc: List[int]
+        cache_indices: List[int]
+        context_lens_tensor: List[int]
+        prev_block_table: List[int]
+        curr_block_table: List[int]
+
+    def __init__(self,
+                 input_builder: "ModelInputForGPUBuilder",
+                 group_id: Optional[int] = None,
+                 app_attn_metadata_builder: Optional[
+                     "AppAwareAttnMetadataBuilder"] = None):
+        super().__init__(input_builder, group_id, app_attn_metadata_builder)
+        assert isinstance(app_attn_metadata_builder, LinearAttentionManager)
+        self.chunk_size = app_attn_metadata_builder.chunk_size
+        self.steps: List[LAMetadataBuilder.Step] = [
+            LAMetadataBuilder.Step([], [], [], [], [], [])
+        ]
+        self.context_lens: List[int] = []
+        self.need_final_copy = False
+        self.to_mutable_src: List[int] = []
+        self.to_mutable_dst: List[int] = []
+        self.num_tokens = 0
+
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int):
+        prefix_cache_hit = any([
+            inter_data.prefix_cache_hit
+            for inter_data in self.input_builder.inter_data_list
+        ])
+        assert not self.input_builder.chunked_prefill_enabled
+        for inter_data in self.input_builder.inter_data_list:
+            self._add_seq_group(inter_data,
+                                self.input_builder.chunked_prefill_enabled,
+                                prefix_cache_hit)
+        for step in self.steps:
+            step.query_start_loc.append(len(step.token_positions))
+
+        device = self.runner.device
+        use_captured_graph = cuda_graph_pad_size != -1
+        if use_captured_graph:
+            raise NotImplementedError
+
+        return LAMetadata(
+            num_prefills=self.num_prefills,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=self.num_decode_tokens,
+            slot_mapping=torch.tensor([], dtype=torch.int),  # not used
+            steps=[
+                LAMetadata.Step(
+                    token_positions=async_tensor_h2d(step.token_positions,
+                                                     torch.int, device,
+                                                     self.runner.pin_memory),
+                    query_start_loc=async_tensor_h2d(step.query_start_loc,
+                                                     torch.int, device,
+                                                     self.runner.pin_memory),
+                    cache_indices=async_tensor_h2d(step.cache_indices,
+                                                   torch.int, device,
+                                                   self.runner.pin_memory),
+                    context_lens_tensor=async_tensor_h2d(
+                        step.context_lens_tensor, torch.int, device,
+                        self.runner.pin_memory),
+                    prev_block_table=async_tensor_h2d(step.prev_block_table,
+                                                      torch.int, device,
+                                                      self.runner.pin_memory),
+                    curr_block_table=async_tensor_h2d(step.curr_block_table,
+                                                      torch.int, device,
+                                                      self.runner.pin_memory),
+                ) for step in self.steps
+            ],
+            need_final_copy=self.need_final_copy,
+            to_mutable_src=async_tensor_h2d(self.to_mutable_src, torch.int,
+                                            device, self.runner.pin_memory),
+            to_mutable_dst=async_tensor_h2d(self.to_mutable_dst, torch.int,
+                                            device, self.runner.pin_memory),
+        )
+
+    def _add_seq_group(
+            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+        is_prompt = inter_data.is_prompt
+        block_tables = inter_data.block_tables
+
+        assert len(inter_data.seq_ids) == 1
+
+        seq_id, token_len, seq_len, curr_seq_len, query_len, context_len = \
+            inter_data.seq_ids[0], len(inter_data.input_tokens[0]), \
+            inter_data.orig_seq_lens[0], inter_data.seq_lens[0], \
+            inter_data.query_lens[0], inter_data.context_lens[0]
+
+        is_profile_run = is_block_tables_empty(block_tables)
+        if block_tables is not None:
+            block_table = block_tables[seq_id][self.group_id]
+        else:
+            # profile run
+            block_table = None
+
+        if is_prompt:
+            for i, start_positon in enumerate(
+                    range(0, seq_len, self.chunk_size)):
+                end_position = min(start_positon + self.chunk_size, seq_len)
+                if len(self.steps) <= i:
+                    self.steps.append(
+                        LAMetadataBuilder.Step([], [], [], [], [], []))
+                step = self.steps[i]
+                step.query_start_loc.append(len(step.query_start_loc))
+                step.token_positions.extend(range(start_positon, end_position))
+                if block_table is not None:
+                    step.cache_indices.append(block_table[i])
+                else:
+                    step.cache_indices.append(0)
+                assert context_len == 0
+                step.context_lens_tensor.append(start_positon)
+                if i > 0 and block_table is not None:
+                    step.prev_block_table.append(block_table[i - 1])
+                    step.curr_block_table.append(block_table[i])
+            if seq_len % self.chunk_size == 0 and block_table is not None:
+                self.need_final_copy = True
+                self.to_mutable_src.append(block_table[-2])
+                self.to_mutable_dst.append(block_table[-1])
+            self.num_tokens += token_len
+            self.num_prefills += 1
+            self.num_prefill_tokens += token_len
+        else:
+            step = self.steps[0]
+            step.token_positions.append(self.num_tokens)
+            step.query_start_loc.append(self.num_tokens)
+            if block_table is not None:
+                step.cache_indices.append(block_table[-1])
+            else:
+                step.cache_indices.append(0)
+            step.context_lens_tensor.append(context_len)
+            self.num_tokens += query_len
+            self.num_decode_tokens += query_len
 
 
 class CommonAttentionState(AttentionState):

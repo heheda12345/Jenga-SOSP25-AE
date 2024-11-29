@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import math
 from typing import List, Optional, Dict, NewType, Set, Tuple, Union
 
-from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVCacheScheduleConfig, KVCacheScheduleGroupConfig, KVPageType, ModelConfig, ParallelConfig, SchedulerConfig, SharedTokenType
+from vllm.config import CacheConfig, ComponentType, KVCacheConfig, KVCacheScheduleConfig, KVCacheScheduleGroupConfig, KVPageType, LAPageType, ModelConfig, ParallelConfig, SchedulerConfig, SharedTokenType
 from vllm.core.block.common import BlockList
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import (
@@ -18,7 +18,7 @@ from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareManager, SharedBlockManager
+from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager, SharedBlockManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
@@ -297,16 +297,26 @@ class CustomBlockManager:
             group_id = app_property
             kv_cache_config.block_table_sharing[group_id] = layer_ids
             for idx_in_group, layer_id in enumerate(layer_ids):
-                kv_cache_config.components[layer_id] = KVPageType(
-                    start_bias=idx_in_group * layer_page_size[layer_id],
-                    num_elements=num_pages * level0_page_size,
-                    page_size=layer_page_size[layer_id],
-                )
+                manager = self._app_aware_managers[layer_id]
+                # TODO: put config generation into manager
+                if isinstance(manager, LinearAttentionManager):
+                    kv_cache_config.components[layer_id] = LAPageType(
+                        start_bias=idx_in_group * layer_page_size[layer_id],
+                        num_elements=num_pages * level0_page_size,
+                        page_size=layer_page_size[layer_id],
+                        page_shape=manager.state_shape,
+                    )
+                else:
+                    kv_cache_config.components[layer_id] = KVPageType(
+                        start_bias=idx_in_group * layer_page_size[layer_id],
+                        num_elements=num_pages * level0_page_size,
+                        page_size=layer_page_size[layer_id],
+                    )
                 if idx_in_group == 0:
                     kv_cache_schedule_config.groups[
                         group_id] = KVCacheScheduleGroupConfig(
-                            prefix_cache_alignment=self._app_aware_managers[
-                                layer_id].get_prefix_cache_alignment(),
+                            prefix_cache_alignment=manager.
+                            get_prefix_cache_alignment(),
                             block_size=self._app_aware_managers[layer_id].
                             get_block_size(),
                             large_small_ratio=level0_page_size //

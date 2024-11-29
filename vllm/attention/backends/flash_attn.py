@@ -13,7 +13,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.core.block_v3.custom_block import SlidingWindowManager
 from vllm.forward_context import get_forward_context
 from vllm.utils import Timer, async_tensor_h2d, check_tensor, make_tensor_with_pad
 

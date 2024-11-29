@@ -182,6 +182,7 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    linear_chunk_size: int = 512
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -847,6 +848,12 @@ class EngineArgs:
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
 
+        parser.add_argument(
+            '--linear-chunk-size',
+            type=int,
+            default=EngineArgs.linear_chunk_size,
+        )
+
         return parser
 
     @classmethod
@@ -940,7 +947,8 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
-            enable_layer_grouping=self.layer_grouping)
+            enable_layer_grouping=self.layer_grouping,
+            linear_chunk_size=self.linear_chunk_size)
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
