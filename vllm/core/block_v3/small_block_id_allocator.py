@@ -97,8 +97,9 @@ class SmallBlockIDAllocator:
                 last=False)[0]
 
         self.free_block_counter[small_block_id // self.large_small_ratio] -= 1
-        assert self.free_block_counter[small_block_id //
-                                       self.large_small_ratio] >= 0
+        assert self.free_block_counter[
+            small_block_id // self.
+            large_small_ratio] >= 0, f"small_block_id: {small_block_id}, large_block_id: {small_block_id // self.large_small_ratio}"
         self.num_free_small_blocks -= 1
         return small_block_id
 
