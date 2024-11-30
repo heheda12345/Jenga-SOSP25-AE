@@ -1310,6 +1310,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:
+    return True
     for mask in sparse_mask:
         # Skip text-only samples.
         if len(mask) == 0:
