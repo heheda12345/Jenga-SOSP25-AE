@@ -14,9 +14,6 @@ class CharacterConfig(LlamaConfig):
         kv_share=None,
         **kwargs,
     ):
-        print("kwargs for config init", kwargs)
-        import traceback
-        traceback.print_stack()
         super().__init__(**kwargs)
         self.kv_share = kv_share
         if _sliding_window is not None:

@@ -426,6 +426,7 @@ class ModelConfig:
     def get_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.
         """
+        return None
         # If user disables sliding window, return None.
         if self.disable_sliding_window:
             return None
@@ -1691,7 +1692,7 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
-    if hf_config.architectures[0] == "MistralForCausalLM":
+    if hf_config.architectures is not None and hf_config.architectures[0] == "MistralForCausalLM":
         possible_keys = ["max_position_embeddings"]
     # Choose the smallest "max_length" from the possible keys.
     max_len_key = None

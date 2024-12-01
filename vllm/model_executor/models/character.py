@@ -221,18 +221,18 @@ class LlamaDecoderLayer(nn.Module):
             config, "bias", False)
 
         sliding_window = None
-        if hasattr(config, "_sliding_window"):
+        if hasattr(config, "sliding_window"):
             layer_id = int(prefix.split('.')[-1])
-            if isinstance(config._sliding_window, (list, tuple)):
-                sliding_window = config._sliding_window[layer_id % len(
-                    config._sliding_window)]
+            if isinstance(config.sliding_window, (list, tuple)):
+                sliding_window = config.sliding_window[layer_id % len(
+                    config.sliding_window)]
                 print(f"Sliding window of layer {layer_id}: {sliding_window}")
-            elif isinstance(config._sliding_window, int):
-                sliding_window = config._sliding_window
+            elif isinstance(config.sliding_window, int):
+                sliding_window = config.sliding_window
                 print(f"Sliding window of layer {layer_id}: {sliding_window}")
             else:
                 raise ValueError(
-                    f"Invalid sliding window config: {config._sliding_window}")
+                    f"Invalid sliding window config: {config.sliding_window}")
         if sliding_window is None:
             sliding_window = -1
         self.self_attn = LlamaAttention(
