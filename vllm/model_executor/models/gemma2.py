@@ -53,7 +53,7 @@ def custom_block_manager_for_gemma2(model_config: ModelConfig,
                                     cache_config: CacheConfig,
                                     parallel_config: ParallelConfig):
     custom_managers = {}
-    sliding_window = model_config.get_sliding_window()
+    sliding_window = model_config.hf_config.sliding_window
     for i in range(model_config.get_num_layers(parallel_config)):
         if i % 2 == 0 and sliding_window is not None:
             custom_managers[str(i)] = SlidingWindowManager(
