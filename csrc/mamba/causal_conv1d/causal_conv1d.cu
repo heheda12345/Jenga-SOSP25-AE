@@ -342,7 +342,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
 
     input_t *conv_states = params.conv_states_ptr == nullptr ? nullptr
-        : reinterpret_cast<input_t *>(params.conv_states_ptr) + cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
+        : reinterpret_cast<input_t *>(params.conv_states_ptr) + 1ll * cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
