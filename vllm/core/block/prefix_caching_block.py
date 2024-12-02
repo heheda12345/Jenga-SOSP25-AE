@@ -338,8 +338,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 seq_id, affine_only=False)
             if hashless_block_id is not None:
                 return hashless_block_id
-            evicted_block_id = self._maybe_allocate_evicted_block_id_level1(
-                seq_id, affine_only=False)
+            evicted_block_id = self._maybe_allocate_evicted_block_id_level1()
             if evicted_block_id is not None:
                 return evicted_block_id
 
