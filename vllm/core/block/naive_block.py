@@ -115,29 +115,35 @@ class NaiveBlockAllocator(BlockAllocator):
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            group_id_hash: int,
-            seq_id: int,
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  group_id_hash: int,
+                                  seq_id: int,
+                                  device: Optional[Device] = None,
+                                  start_from_block: int = 0) -> List[Block]:
         # assert device is None
         # we can ignore _group_id_hash in naive block allocator
         num_blocks = len(block_token_ids)
 
         block_ids = []
         for i in range(num_blocks):
-            block_ids.append(self._allocate_block_id(seq_id=seq_id))
+            if i < start_from_block:
+                block_ids.append(self.allocate_or_get_null_block().block_id)
+            else:
+                block_ids.append(self._allocate_block_id(seq_id=seq_id))
 
         blocks = []
         for i in range(num_blocks):
-            prev_block = self._block_pool.init_block(
-                prev_block=prev_block,
-                token_ids=block_token_ids[i],
-                block_size=self._block_size,
-                physical_block_id=block_ids[i],
-                group_id_hash=group_id_hash)
+            if i < start_from_block:
+                prev_block = self.allocate_or_get_null_block()
+            else:
+                prev_block = self._block_pool.init_block(
+                    prev_block=prev_block,
+                    token_ids=block_token_ids[i],
+                    block_size=self._block_size,
+                    physical_block_id=block_ids[i],
+                    group_id_hash=group_id_hash)
             blocks.append(prev_block)
 
         return blocks

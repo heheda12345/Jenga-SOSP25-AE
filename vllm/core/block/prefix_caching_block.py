@@ -198,13 +198,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            group_id_hash: int,
-            seq_id: int,
-            device: Optional[Device] = None) -> List[Block]:
+    def allocate_immutable_blocks(self,
+                                  prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  group_id_hash: int,
+                                  seq_id: int,
+                                  device: Optional[Device] = None,
+                                  start_from_block: int = 0) -> List[Block]:
+        if start_from_block > 0:
+            raise NotImplementedError
         blocks = []
         for token_ids in block_token_ids:
             prev_block = self.allocate_immutable_block(

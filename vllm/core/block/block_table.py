@@ -45,7 +45,8 @@ class BlockTable:
                  max_block_sliding_window: Optional[int] = None,
                  block_id_multiplier: int = 1,
                  group_id: str = "",
-                 seq_id: int = -1) -> None:
+                 seq_id: int = -1,
+                 ring_num_block: int = -1) -> None:
         self._block_size = block_size
         self._allocator = block_allocator
         if _blocks is None:
@@ -59,6 +60,8 @@ class BlockTable:
         self._group_id_hash = hash(group_id)  # TODO: remove hash recomputation
         assert seq_id != -1
         self._seq_id = seq_id
+        self.ring_num_block = ring_num_block
+        self.real_num_block = 0
 
     @staticmethod
     def get_num_required_blocks(token_ids: List[int],
@@ -86,7 +89,8 @@ class BlockTable:
 
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU) -> None:
+                 device: Device = Device.GPU,
+                 start_from: int = 0) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -101,7 +105,8 @@ class BlockTable:
         assert token_ids
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
-                                                     device=device)
+                                                     device=device,
+                                                     start_from=start_from)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -199,6 +204,9 @@ class BlockTable:
 
         for _ in range(blocks_to_allocate):
             assert len(self._blocks) > 0
+            if self.ring_num_block != -1 and len(
+                    self._blocks) >= self.ring_num_block:
+                break
             self._blocks.append(
                 self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1],
@@ -258,11 +266,23 @@ class BlockTable:
             List[int]: A list of physical block indices for the blocks in the
                 BlockTable.
         """
-        return self._blocks.ids()
+        block_ids = self._blocks.ids()
+        if self.ring_num_block != -1:
+            block_id_ret = []
+            while len(block_id_ret) < self.real_num_block:
+                block_id_ret.extend(block_ids)
+            return block_id_ret[:self.real_num_block]
+        return block_ids
 
     @property
     def physical_block_ids_for_exec(self) -> List[int]:
-        return self._blocks.ids_for_exec()
+        block_ids = self._blocks.ids_for_exec()
+        if self.ring_num_block != -1:
+            block_id_ret = []
+            while len(block_id_ret) < self.real_num_block:
+                block_id_ret.extend(block_ids)
+            return block_id_ret[:self.real_num_block]
+        return block_ids
 
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
         """Get the number of "unseen" tokens in the sequence.
@@ -284,8 +304,8 @@ class BlockTable:
         return sequence_token_ids[self.num_full_slots:]
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_ids: List[int],
-                                       device: Device) -> List[Block]:
+                                       token_ids: List[int], device: Device,
+                                       start_from: int) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -297,13 +317,17 @@ class BlockTable:
                 tail_token_ids.append(cur_token_ids)
 
         if block_token_ids:
+            if self.ring_num_block != -1:
+                assert prev_block is None
+                block_token_ids = block_token_ids[:self.ring_num_block]
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
                     prev_block,
                     block_token_ids=block_token_ids,
                     group_id_hash=self._group_id_hash,
                     seq_id=self._seq_id,
-                    device=device))
+                    device=device,
+                    start_from_block=start_from // self._block_size))
             prev_block = blocks[-1]
 
         if tail_token_ids:

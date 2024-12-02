@@ -335,6 +335,8 @@ class SlidingWindowManager(AppAwareManager):
         # For example, if sliding_window is 3 and block_size is 4,
         # we may need 2 blocks when the second block only holds 1 token.
         self.max_block_sliding_window = num_blocks + 1
+        # full, ring, null
+        self.allocation_mode = ""
 
     def get_page_size(self):
         return self.block_size * self.memory_per_token
@@ -342,16 +344,16 @@ class SlidingWindowManager(AppAwareManager):
     def get_app_property(self) -> str:
         return f"sliding_window_{self.sliding_window_size}_{self.get_page_size()}"
 
-    def get_num_required_blocks(self,
-                                seq_group: SequenceGroup,
-                                num_lookahead_slots: int = 0) -> int:
+    def get_num_required_blocks(self, seq_group: SequenceGroup,
+                                num_lookahead_slots: int) -> int:
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_tokens = len(seq.get_token_ids())
         num_required_blocks = cdiv(num_tokens + num_lookahead_slots,
                                    self.block_size)
         # Do not calculate min here, as prefill phase allocates all blocks
-        # num_required_blocks = min(num_required_blocks,
-        #                           self.max_block_sliding_window)
+        if self.allocation_mode in ("ring", "full"):
+            num_required_blocks = min(num_required_blocks,
+                                      self.max_block_sliding_window + 1)
         return num_required_blocks
 
     def allocate_sequence(self, seq_group: SequenceGroup,
@@ -360,14 +362,32 @@ class SlidingWindowManager(AppAwareManager):
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         # TODO: handle sliding window in this manager, so that we can remove the
         # sliding window logic in other parts of the code
+        ring_num_block = -1
+        if self.allocation_mode == "ring":
+            ring_num_block = self.max_block_sliding_window
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
             group_id=group_id,
-            seq_id=seq.seq_id)
-        block_table.allocate(seq.get_token_ids())
-        block_table.free_start = 0
+            seq_id=seq.seq_id,
+            ring_num_block=ring_num_block,
+        )
+        if self.allocation_mode == "full":
+            block_table.allocate(seq.get_token_ids())
+            block_table.free_start = 0
+        elif self.allocation_mode == "ring":
+            block_table.allocate(seq.get_token_ids())
+            block_table.free_start = 0
+        elif self.allocation_mode == "null":
+            start_from = len(seq.get_token_ids()) - self.sliding_window_size
+            block_table.allocate(seq.get_token_ids(), start_from=start_from)
+            block_table.free_start = start_from // self.block_size
+        else:
+            raise ValueError(
+                f"Unknown allocation mode: {self.allocation_mode}")
+        block_table.real_num_block = cdiv(len(seq.get_token_ids()),
+                                          self.block_size)
         return block_table
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
@@ -400,14 +420,21 @@ class SlidingWindowManager(AppAwareManager):
             unseen_token_ids)
 
         for i, token_block in enumerate(token_blocks):
+            if block_table.ring_num_block != -1 and first_block_idx + i >= len(
+                    block_table.blocks):
+                break
             block_table._blocks.append_token_ids(first_block_idx + i,
                                                  token_block)
 
         block_table._num_full_slots += len(unseen_token_ids)
+        block_table.real_num_block = cdiv(len(seq.get_token_ids()),
+                                          self.block_size)
 
     def free_skipped_blocks(
             self, seq: Sequence, block_table: BlockTable,
             last_access_blocks_tracker: LastAccessBlocksTracker):
+        if self.allocation_mode == "ring":
+            return
         num_computed_slots = seq.data.get_num_computed_tokens()
         null_block = block_table._allocator.allocate_or_get_null_block()
         assert num_computed_slots is not None

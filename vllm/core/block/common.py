@@ -55,7 +55,7 @@ class RefCounter(RefCounterProtocol):
         return post_incr_refcount
 
     def decr(self, block_id: BlockId) -> RefCount:
-        assert block_id in self._refcounts
+        assert block_id in self._refcounts, f"Block {block_id} not found"
         refcount = self._refcounts[block_id]
         # if block_id == 3697:
         #     print(f"decr block_id: {block_id}, refcount: {refcount}")

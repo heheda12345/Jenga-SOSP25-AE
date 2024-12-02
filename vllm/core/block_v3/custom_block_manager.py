@@ -18,7 +18,7 @@ from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager, SharedBlockManager
+from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager, SharedBlockManager, SlidingWindowManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
@@ -205,6 +205,25 @@ class CustomBlockManager:
                 self.num_total_gpu_blocks,
             ))
 
+    def determine_sliding_window_mode(self):
+        if self.cache_config.enable_prefix_caching:
+            mode = "full"
+            for manager in self._app_aware_managers.values():
+                if isinstance(manager, SlidingWindowManager):
+                    manager.allocation_mode = mode
+        elif self.scheduler_config.chunked_prefill_enabled:
+            mode = "ring"
+            for manager in self._app_aware_managers.values():
+                if isinstance(manager, SlidingWindowManager):
+                    assert manager.sliding_window_size >= self.scheduler_config.max_num_batched_tokens
+                    manager.allocation_mode = mode
+        else:
+            mode = "null"
+            for manager in self._app_aware_managers.values():
+                if isinstance(manager, SlidingWindowManager):
+                    manager.allocation_mode = mode
+        print("Sliding window mode: ", mode)
+
     @require_kv_config_not_init
     def compile(self, available_cpu_memory: int,
                 available_gpu_memory: int) -> KVCacheConfig:
@@ -216,6 +235,7 @@ class CustomBlockManager:
         if available_gpu_memory > 0:
             self._initialized = True
             self.init_allocator()
+        self.determine_sliding_window_mode()
         return self._kv_cache_config
 
     @property
