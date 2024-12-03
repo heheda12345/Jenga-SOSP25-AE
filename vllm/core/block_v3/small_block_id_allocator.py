@@ -31,6 +31,7 @@ class SmallBlockIDAllocator:
         # large_block_id -> seq_id. Each page has a prefer seq_id, even when the seq is freed.
         self.large_block_to_seq_id: Dict[int, int] = {}
         self.add_seq(NULL_BLOCK_SEQ_ID)
+        self.num_large_block = 0
 
     class NoFreeLevel1BlocksError(ValueError):
         pass
@@ -48,6 +49,7 @@ class SmallBlockIDAllocator:
                 # allocate new large block
                 new_large_block_id = self.large_block_id_allocator.allocate_block_id(
                 )
+                self.num_large_block += 1
                 # update large block trackers
                 new_small_block_ids = [
                     new_large_block_id * self.large_small_ratio + i
@@ -131,6 +133,7 @@ class SmallBlockIDAllocator:
                     to_free_lv1_block_ids)
             del self.free_block_counter[lv0_block_id]
             self.large_block_id_allocator.free_block_id(lv0_block_id)
+            self.num_large_block -= 1
             self.num_free_small_blocks -= self.large_small_ratio
 
     def remove_seq(self, seq_id: int):

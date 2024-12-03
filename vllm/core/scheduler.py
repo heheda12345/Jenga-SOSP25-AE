@@ -1,4 +1,5 @@
 import enum
+import math
 import os
 import random
 import time
@@ -1284,6 +1285,8 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[
                     seq_id] = self.block_manager.get_block_table_for_exec(seq)
+                # print("block_table", seq_id,
+                #       self.block_manager.get_block_table_for_schedule(seq))
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
@@ -1411,6 +1414,40 @@ class Scheduler:
 
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
+
+        if self.scheduler_config.log_mem_usage:
+            num_free_page = self.block_manager.get_num_free_gpu_blocks()
+            self_attn_tokens = 0
+            self_attn_pages = 0
+            sliding_window_tokens = 0
+            sliding_window_pages = 0
+            all_tokens = []
+            custom_block_manager = self.block_manager.custom_block_manager
+            sliding_window_small_allocator = custom_block_manager.group_allocators[
+                'sliding_window_32768_32768']._block_id_allocator
+            self_attention_small_allocator = custom_block_manager.group_allocators[
+                'self_attention_32768']._block_id_allocator
+            sliding_window_large_pages = sliding_window_small_allocator.num_large_block
+            self_attn_large_pages = self_attention_small_allocator.num_large_block
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                seq_group = scheduled_seq_group.seq_group
+                for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                    num_tokens = seq.get_len()
+                    self_attn_tokens += num_tokens
+                    self_attn_pages += math.ceil(num_tokens /
+                                                 self.cache_config.block_size)
+                    num_sliding_window_tokens = min(num_tokens, 32768)
+                    sliding_window_tokens += num_sliding_window_tokens
+                    sliding_window_pages += math.ceil(
+                        num_sliding_window_tokens /
+                        self.cache_config.block_size)
+                    all_tokens.append(num_tokens)
+
+            # self_attention_32768
+            # sliding_window_32768_32768
+            print(
+                f"[STEP] [FREE] {num_free_page} [SELF_ATTN] {self_attn_tokens} {self_attn_pages} {self_attn_large_pages} [SLIDING_WINDOW] {sliding_window_tokens} {sliding_window_pages} {sliding_window_large_pages} [ALL] {all_tokens}"
+            )
 
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,

@@ -351,7 +351,7 @@ class SlidingWindowManager(AppAwareManager):
         num_required_blocks = cdiv(num_tokens + num_lookahead_slots,
                                    self.block_size)
         # Do not calculate min here, as prefill phase allocates all blocks
-        if self.allocation_mode in ("ring", "full"):
+        if self.allocation_mode in ("ring", "null"):
             num_required_blocks = min(num_required_blocks,
                                       self.max_block_sliding_window + 1)
         return num_required_blocks

@@ -183,6 +183,7 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
     linear_chunk_size: int = 512
+    log_mem_usage: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -854,6 +855,11 @@ class EngineArgs:
             default=EngineArgs.linear_chunk_size,
         )
 
+        parser.add_argument(
+            '--log-mem-usage',
+            action='store_true',
+        )
+
         return parser
 
     @classmethod
@@ -1069,6 +1075,7 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
+            log_mem_usage=self.log_mem_usage,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
