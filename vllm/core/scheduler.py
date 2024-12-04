@@ -1326,6 +1326,10 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
+                if self.scheduler_config.chunked_prefill_enabled:
+                    send_multimodal_data = is_first_prefill
+                else:
+                    send_multimodal_data = scheduler_outputs.num_prefill_groups > 0
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1345,7 +1349,7 @@ class Scheduler:
                     # the subsequent comms can still use delta, but
                     # `multi_modal_data` will be None.
                     multi_modal_data=seq_group.multi_modal_data
-                    if scheduler_outputs.num_prefill_groups > 0 else None,
+                    if send_multimodal_data else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
