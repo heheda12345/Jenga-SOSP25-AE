@@ -36,7 +36,8 @@ from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
                      dummy_video_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings,
+                    merge_multimodal_embeddings_from_map)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
@@ -838,6 +839,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # TODO(ywang96): Add support for mixed-modality inference for v1.
         multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
 
+        print("encoder caller")
         if "images" in modalities:
             image_input = modalities["images"]
             vision_embeddings = self._process_image_input(image_input)
@@ -854,14 +856,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[List[Tuple[NestedTensors,
                                                    str]]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             for embeddings, modality in multimodal_embeddings:
                 if modality == "image":
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids, inputs_embeds, embeddings,
-                        self.config.image_token_index)
+                    merge_multimodal_embeddings_from_map(
+                        inputs_embeds, embeddings, attn_metadata.
+                        multi_modal_placeholder_index_maps["image"])
                 if modality == "video":
                     inputs_embeds = merge_multimodal_embeddings(
                         input_ids, inputs_embeds, embeddings,
@@ -892,7 +895,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         elif inputs_embeds is None:
             multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      multimodal_embeddings)
+                                                      multimodal_embeddings,
+                                                      attn_metadata)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

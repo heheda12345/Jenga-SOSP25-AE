@@ -47,7 +47,7 @@ from vllm.utils import is_list_of
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    merge_multimodal_embeddings_from_map)
 
 logger = init_logger(__name__)
 
@@ -687,12 +687,16 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
+
+            # TODO(ywang96): use merge_multimodal_embeddings after
+            # v0 is deprecated
+            merge_multimodal_embeddings_from_map(
+                inputs_embeds, multimodal_embeddings,
+                attn_metadata.multi_modal_placeholder_index_maps["image"])
         return inputs_embeds
 
     def forward(self,
@@ -712,7 +716,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+                                                      vision_embeddings,
+                                                      attn_metadata)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
