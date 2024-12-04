@@ -16,7 +16,10 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.attention.backends.utils import MMEmbeddingMetadata
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.core.block_v3.custom_block import SelfAttentionManager, VisionEmbeddingManager
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -40,6 +43,21 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def custom_block_manager_for_internvl(model_config: ModelConfig,
+                                      cache_config: CacheConfig,
+                                      parallel_config: ParallelConfig):
+    custom_managers = {}
+    for i in range(model_config.get_num_layers(parallel_config)):
+        custom_managers[str(i)] = SelfAttentionManager(
+            model_config, parallel_config, cache_config.cache_dtype,
+            cache_config.block_size)
+    share_layer_ids = set(custom_managers.keys())
+    custom_managers["vision"] = VisionEmbeddingManager(
+        model_config, parallel_config, cache_config.cache_dtype,
+        cache_config.block_size, share_layer_ids)
+    return custom_managers
 
 
 class InternVLImagePixelInputs(TypedDict):
@@ -320,6 +338,8 @@ class InternVLInputPipeline:
                                                num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
 
+        multi_modal_data['text'] = new_prompt_token_ids
+
         return LLMInputs(prompt=prompt,
                          prompt_token_ids=new_prompt_token_ids,
                          multi_modal_data=multi_modal_data)
@@ -394,7 +414,7 @@ class InternVLInputPipeline:
             image_width_override=max_image_width,
             image_height_override=max_image_height,
         )
-
+        mm_data['text'] = seq_data.prompt_token_ids
         return seq_data, mm_data
 
 
@@ -405,6 +425,8 @@ input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(input_pipeline.dummy_data)
 @INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
+@BLOCK_MANAGER_REGISTRY.register_block_manager(
+    custom_block_manager_for_internvl)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
@@ -574,14 +596,47 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             input_ids = None
             inputs_embeds = None
         else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is not None:
+            vision_metadata = attn_metadata['vision']
+            assert isinstance(vision_metadata, MMEmbeddingMetadata)
+            if vision_metadata.num_mm_prefills > 0:
+                # run vision encoder
+                vision_kwargs = MultiModalInputs.as_kwargs(
+                    vision_metadata.multi_modal_inputs,
+                    device=input_ids.device)
+                image_input = self._parse_and_validate_image_input(
+                    **vision_kwargs)
+                mm_input_ids = vision_metadata.mm_token_ids
+                assert image_input is not None
                 inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                    mm_input_ids)
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
+                    mm_input_ids, inputs_embeds, vision_embeddings,
                     self.img_context_token_id)
+                if kv_caches['vision'].numel() > 0:
+                    kv_caches['vision'][
+                        vision_metadata.mm_slot_mapping, :inputs_embeds.
+                        shape[-1]] = inputs_embeds
+            if vision_metadata.num_prefills > 0:
+                # fetch prefill embeddings from kv_caches and run decode embeddings
+                num_prefill_tokens = vision_metadata.num_prefill_tokens
+                prefill_slots = vision_metadata.slot_mapping[:
+                                                             num_prefill_tokens]
+                hidden_size = self.config.text_config.hidden_size
+                if kv_caches['vision'].numel() == 0:
+                    # dummy embedding for profile run
+                    prefill_embeds = torch.ones(
+                        (num_prefill_tokens, hidden_size),
+                        dtype=kv_caches['vision'].dtype,
+                        device=input_ids.device)
+                else:
+                    # fetch prefill embeddings from kv_caches
+                    prefill_embeds = kv_caches['vision'][
+                        prefill_slots, :hidden_size]
+                decode_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids[num_prefill_tokens:])
+                inputs_embeds = torch.cat((prefill_embeds, decode_embeds),
+                                          dim=0)
                 input_ids = None
             else:
                 inputs_embeds = None

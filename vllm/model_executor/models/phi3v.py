@@ -26,7 +26,10 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.attention.backends.utils import MMEmbeddingMetadata
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.core.block_v3.custom_block import SelfAttentionManager, VisionEmbeddingManager
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -35,6 +38,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -63,6 +67,21 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      num_hidden_layers=24,
                                                      patch_size=14,
                                                      projection_dim=768)
+
+
+def custom_block_manager_for_phi3v(model_config: ModelConfig,
+                                   cache_config: CacheConfig,
+                                   parallel_config: ParallelConfig):
+    custom_managers = {}
+    for i in range(model_config.get_num_layers(parallel_config)):
+        custom_managers[str(i)] = SelfAttentionManager(
+            model_config, parallel_config, cache_config.cache_dtype,
+            cache_config.block_size)
+    share_layer_ids = set(custom_managers.keys())
+    custom_managers["vision"] = VisionEmbeddingManager(
+        model_config, parallel_config, cache_config.cache_dtype,
+        cache_config.block_size, share_layer_ids)
+    return custom_managers
 
 
 def _init_img_processor(hf_config: PretrainedConfig):
@@ -381,7 +400,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
         image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
-
+    mm_data['text'] = seq_data.prompt_token_ids
     return seq_data, mm_data
 
 
@@ -496,6 +515,8 @@ def input_processor_for_phi3v(ctx: InputContext,
         else:
             new_token_ids.append(token_id)
 
+    multi_modal_data['text'] = new_token_ids
+
     # NOTE: Create a defensive copy of the original inputs
     llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
                            prompt=new_prompt,
@@ -507,6 +528,7 @@ def input_processor_for_phi3v(ctx: InputContext,
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
+@BLOCK_MANAGER_REGISTRY.register_block_manager(custom_block_manager_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self,
@@ -645,15 +667,47 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             input_ids = None
             inputs_embeds = None
         else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-
-            if image_input is not None:
+            vision_metadata = attn_metadata['vision']
+            assert isinstance(vision_metadata, MMEmbeddingMetadata)
+            if vision_metadata.num_mm_prefills > 0:
+                # run vision encoder
+                vision_kwargs = MultiModalInputs.as_kwargs(
+                    vision_metadata.multi_modal_inputs,
+                    device=input_ids.device)
+                image_input = self._parse_and_validate_image_input(
+                    **vision_kwargs)
+                mm_input_ids = vision_metadata.mm_token_ids
+                assert image_input is not None
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                    mm_input_ids)
                 inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
+                    mm_input_ids, inputs_embeds, vision_embeddings,
                     self.image_token_id)
+                if kv_caches['vision'].numel() > 0:
+                    kv_caches['vision'][
+                        vision_metadata.mm_slot_mapping, :inputs_embeds.
+                        shape[-1]] = inputs_embeds
+            if vision_metadata.num_prefills > 0:
+                # fetch prefill embeddings from kv_caches and run decode embeddings
+                num_prefill_tokens = vision_metadata.num_prefill_tokens
+                prefill_slots = vision_metadata.slot_mapping[:
+                                                             num_prefill_tokens]
+                hidden_size = self.config.get_text_config().hidden_size
+                if kv_caches['vision'].numel() == 0:
+                    # dummy embedding for profile run
+                    prefill_embeds = torch.ones(
+                        (num_prefill_tokens, hidden_size),
+                        dtype=kv_caches['vision'].dtype,
+                        device=input_ids.device)
+                else:
+                    # fetch prefill embeddings from kv_caches
+                    prefill_embeds = kv_caches['vision'][
+                        prefill_slots, :hidden_size]
+                decode_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids[num_prefill_tokens:])
+                inputs_embeds = torch.cat((prefill_embeds, decode_embeds),
+                                          dim=0)
                 input_ids = None
             else:
                 inputs_embeds = None

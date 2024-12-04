@@ -61,7 +61,11 @@ def run_llava_onevision(question: str, modality: str):
         <|im_start|>assistant\n"
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-              max_model_len=16384)
+              max_model_len=16384,
+              enable_chunked_prefill=True,
+              max_num_batched_tokens=256,
+              use_v2_block_manager=False,
+              use_per_layer_block_manager=True)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -107,7 +111,10 @@ def run_phi3v(question: str, modality: str):
         max_num_seqs=2,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
-    )
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=256,
+        use_v2_block_manager=False,
+        use_per_layer_block_manager=True)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -182,11 +189,13 @@ def run_internvl(question: str, modality: str):
 
     model_name = "OpenGVLab/InternVL2-2B"
 
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-    )
+    llm = LLM(model=model_name,
+              trust_remote_code=True,
+              max_model_len=4096,
+              enable_chunked_prefill=True,
+              max_num_batched_tokens=256,
+              use_v2_block_manager=False,
+              use_per_layer_block_manager=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)

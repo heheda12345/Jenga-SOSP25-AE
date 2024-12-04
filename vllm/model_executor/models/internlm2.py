@@ -159,11 +159,17 @@ class InternLM2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        layer_id: str,
     ) -> torch.Tensor:
         qkv, _ = self.wqkv(hidden_states)
         q, k, v = self.split_qkv(qkv)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
+                                layer_id=layer_id)
         output, _ = self.wo(attn_output)
         return output
 
@@ -209,6 +215,7 @@ class InternLMDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        layer_id: str,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -222,6 +229,7 @@ class InternLMDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            layer_id=layer_id,
         )
 
         # Fully Connected
@@ -281,13 +289,12 @@ class InternLM2Model(nn.Module):
             residual = intermediate_tensors["residual"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
-                residual,
-            )
+            hidden_states, residual = layer(positions,
+                                            hidden_states,
+                                            kv_caches[str(i)],
+                                            attn_metadata[str(i)],
+                                            residual,
+                                            layer_id=str(i))
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
