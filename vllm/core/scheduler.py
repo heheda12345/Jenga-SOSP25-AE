@@ -1,4 +1,5 @@
 import enum
+import math
 import os
 import random
 import time
@@ -1369,6 +1370,25 @@ class Scheduler:
 
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
+
+        if self.scheduler_config.log_mem_usage:
+            num_free_page = self.block_manager.block_allocator.get_num_free_blocks(device=Device.GPU)
+            self_attn_tokens = 0
+            self_attn_pages = 0
+            sliding_window_tokens = 0
+            sliding_window_pages = 0
+            all_tokens = []
+            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+                seq_group = scheduled_seq_group.seq_group
+                for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                    num_tokens = seq.get_len()
+                    self_attn_tokens += num_tokens
+                    self_attn_pages += math.ceil(num_tokens / self.block_manager.block_size)
+                    num_sliding_window_tokens = min(num_tokens, 32768)
+                    sliding_window_tokens += num_sliding_window_tokens
+                    sliding_window_pages += math.ceil(num_sliding_window_tokens / self.block_manager.block_size)
+                    all_tokens.append(num_tokens)
+            print(f"[STEP] [FREE] {num_free_page} [SELF_ATTN] {self_attn_tokens} {self_attn_pages} [SLIDING_WINDOW] {sliding_window_tokens} {sliding_window_pages} [ALL] {all_tokens}")
 
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,

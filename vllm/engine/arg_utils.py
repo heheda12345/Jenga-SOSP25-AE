@@ -179,6 +179,9 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    log_mem_usage: bool = False
+    fixed_acceptance_rate: Optional[float] = None
+    spec_decode_max_page: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -822,6 +825,25 @@ class EngineArgs:
             'or "priority" (requests are handled based on given '
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
+        
+        parser.add_argument(
+            '--log-mem-usage',
+            action='store_true',
+        )
+
+        parser.add_argument(
+            '--fixed-acceptance-rate',
+            type=float,
+            default=None,
+        )
+
+        parser.add_argument(
+            '--spec-decode-max-page',
+            action=StoreBoolean,
+            nargs="?",
+            const="False",
+            default=EngineArgs.spec_decode_max_page,
+        )
 
         return parser
 
@@ -998,6 +1020,8 @@ class EngineArgs:
             typical_acceptance_sampler_posterior_alpha=self.
             typical_acceptance_sampler_posterior_alpha,
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
+            fixed_acceptance_rate=self.fixed_acceptance_rate,
+            spec_decode_max_page=self.spec_decode_max_page,
         )
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
@@ -1034,6 +1058,7 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
+            log_mem_usage=self.log_mem_usage,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

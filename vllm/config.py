@@ -959,7 +959,8 @@ class SchedulerConfig:
                  num_scheduler_steps: int = 1,
                  multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False,
-                 policy: str = "fcfs") -> None:
+                 policy: str = "fcfs",
+                 log_mem_usage: bool = False) -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:
                 if num_scheduler_steps > 1:
@@ -1009,6 +1010,7 @@ class SchedulerConfig:
         self.multi_step_stream_outputs = multi_step_stream_outputs
         self.send_delta_data = send_delta_data
         self.policy = policy
+        self.log_mem_usage = log_mem_usage
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1119,6 +1121,8 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_threshold: Optional[float],
         typical_acceptance_sampler_posterior_alpha: Optional[float],
         disable_logprobs: Optional[bool],
+        fixed_acceptance_rate: Optional[float],
+        spec_decode_max_page: bool,
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -1312,6 +1316,8 @@ class SpeculativeConfig:
                 typical_acceptance_sampler_posterior_alpha,
             disable_logprobs=disable_logprobs,
             disable_log_stats=disable_log_stats,
+            fixed_acceptance_rate=fixed_acceptance_rate,
+            spec_decode_max_page=spec_decode_max_page
         )
 
     @staticmethod
@@ -1407,6 +1413,8 @@ class SpeculativeConfig:
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
         disable_log_stats: bool,
+        fixed_acceptance_rate: Optional[float],
+        spec_decode_max_page: bool,
     ):
         """Create a SpeculativeConfig object.
 
@@ -1457,6 +1465,8 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_alpha
         self.disable_logprobs = disable_logprobs
         self.disable_log_stats = disable_log_stats
+        self.fixed_acceptance_rate = fixed_acceptance_rate
+        self.spec_decode_max_page = spec_decode_max_page
 
         self._verify_args()
 

@@ -32,7 +32,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
     def __init__(self,
                  strict_mode: bool = False,
-                 use_flashinfer: Optional[bool] = None):
+                 use_flashinfer: Optional[bool] = None,
+                 fixed_acceptance_rate: Optional[float] = None):
         """Create a rejection sampler.
 
         Args:
@@ -50,6 +51,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                 chain_speculative_sampling is not None)
         else:
             self.use_flashinfer = use_flashinfer
+        
+        self.fixed_acceptance_rate = fixed_acceptance_rate
 
         if self.use_flashinfer:
             logger.info("Use flashinfer for rejection sampling.")
@@ -63,6 +66,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
+        fixed_acceptance_rate: Optional[float] = None,
     ) -> torch.Tensor:
         """Sample token ids using rejection sampling. This accepts or rejects
         tokens proposed by the draft model using the probability of each token
@@ -115,6 +119,38 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # just an empty tensor.
         if batch_size == 0:
             return torch.empty(0, k + 1, device=draft_probs.device, dtype=int)
+        
+        if fixed_acceptance_rate is not None:
+            batch_size, k, _ = draft_probs.shape
+            accepted = torch.zeros(batch_size,
+                                   k,
+                                   dtype=torch.bool,
+                                   device=draft_probs.device)
+            ############# The following code is wrong #############
+            # the accepted length should not depend on k
+            # -1 here to exclude the bonus token
+            # acc_len = self.round((1 - fixed_acceptance_rate**(k + 1)) /
+            #                      (1 - fixed_acceptance_rate)) - 1
+            ########################################################
+            acc_len = 0
+            while random.random() < fixed_acceptance_rate and acc_len < k:
+                acc_len += 1
+
+            accepted[:, :acc_len] = 1
+            accepted[:, acc_len:] = 0
+            # print(acc_len, k)
+
+            recovered_token_ids = torch.zeros(batch_size,
+                                              k,
+                                              dtype=torch.long,
+                                              device=draft_probs.device)
+            output_token_ids = self._create_output(
+                accepted,
+                recovered_token_ids,
+                draft_token_ids,
+                bonus_token_ids,
+            )
+            return output_token_ids
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling

@@ -82,6 +82,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
+        fixed_acceptance_rate=speculative_config.fixed_acceptance_rate,
+        spec_decode_max_page=speculative_config.spec_decode_max_page,
     )
 
     return spec_decode_worker
@@ -127,6 +129,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
         disable_log_stats: bool,
+        fixed_acceptance_rate: Optional[float],
+        spec_decode_max_page: bool,
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
@@ -171,7 +175,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
-            spec_decode_sampler = RejectionSampler()
+            spec_decode_sampler = RejectionSampler(fixed_acceptance_rate=fixed_acceptance_rate)
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 posterior_threshold=\
@@ -213,7 +217,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
             spec_decode_sampler=spec_decode_sampler,
-            allow_zero_draft_token_step=allow_zero_draft_token_step)
+            allow_zero_draft_token_step=allow_zero_draft_token_step,
+            spec_decode_max_page=spec_decode_max_page)
 
     def __init__(
         self,
@@ -226,6 +231,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         metrics_collector: Optional[AsyncMetricsCollector] = None,
         disable_by_batch_size: Optional[int] = None,
         allow_zero_draft_token_step: Optional[bool] = True,
+        spec_decode_max_page: bool = False,
     ):
         """
         Create a SpecDecodeWorker.
@@ -288,6 +294,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
+        self._spec_decode_max_page = spec_decode_max_page
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -367,7 +374,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         new_num_gpu_blocks = split_num_cache_blocks_evenly(
             scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
-            num_gpu_blocks)
+            num_gpu_blocks, self._spec_decode_max_page)
         return new_num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -1041,7 +1048,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
                                   proposer_cache_block_size_bytes: int,
-                                  total_num_gpu_blocks: int) -> int:
+                                  total_num_gpu_blocks: int,
+                                  spec_decode_max_page: bool) -> int:
     """Given total_num_gpu_blocks, the number of GPU blocks that could be
     allocate to the target model, this function calculates how many blocks
     should be given to the draft and target model.
@@ -1055,9 +1063,16 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
     the total memory usage from KV cache is no larger than the number of
     blocks allocatable by the target model alone.
     """
-    new_num_gpu_blocks = int(
-        total_num_gpu_blocks * scorer_cache_block_size_bytes /
-        (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
+    import traceback
+    traceback.print_stack()
+    print("spec_decode_max_page", spec_decode_max_page)
+    if spec_decode_max_page:
+        print("!!!!!!!!!!!!!!! spec decode max page size")
+        new_num_gpu_blocks = total_num_gpu_blocks // 2
+    else:
+        new_num_gpu_blocks = int(
+            total_num_gpu_blocks * scorer_cache_block_size_bytes /
+            (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
 
     return new_num_gpu_blocks
 

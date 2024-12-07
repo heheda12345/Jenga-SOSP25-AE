@@ -776,9 +776,6 @@ def unified_flash_attention(
         # else:
         #     timer_window_decode.start() 
         if decode_meta.max_decode_query_len > 1:
-            raise NotImplementedError("need more checks")
-            if window_size[0] != -1:
-                raise NotImplementedError
             decode_output = flash_attn_varlen_func(
                 q=decode_query,
                 k=key_cache,
