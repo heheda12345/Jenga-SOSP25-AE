@@ -17,9 +17,9 @@ except (ModuleNotFoundError, ImportError) as err:
         "Draft model speculative decoding currently only supports"
         "CUDA and ROCm flash attention backend.") from err
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
@@ -58,6 +58,7 @@ class TP1DraftModelRunner(ModelRunner):
         cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
+        kv_cache_config: KVCacheConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
@@ -82,6 +83,7 @@ class TP1DraftModelRunner(ModelRunner):
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
             observability_config=observability_config,
+            kv_cache_config=kv_cache_config,
         )
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
@@ -118,10 +120,12 @@ class TP1DraftModelRunner(ModelRunner):
 
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        for layer_ids in self.kv_cache_config.block_table_sharing.values():
+            layer_metadata = attn_metadata[layer_ids[0]]
+            assert isinstance(layer_metadata, FlashAttentionMetadata)
 
-        attn_metadata.advance_step(model_input, sampled_token_ids,
-                                   self.block_size, num_seqs, num_queries)
+            layer_metadata.advance_step(model_input, sampled_token_ids,
+                                        self.block_size, num_seqs, num_queries)
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
@@ -133,7 +137,7 @@ class TP1DraftModelRunner(ModelRunner):
             input_tokens=model_input.input_tokens,
             input_positions=model_input.input_positions,
             attn_metadata=attn_metadata,
-            seq_lens=attn_metadata.seq_lens,
+            seq_lens=attn_metadata['0'].seq_lens,
             query_lens=model_input.query_lens,
             lora_mapping=model_input.lora_mapping,
             lora_requests=model_input.lora_requests,
@@ -251,7 +255,8 @@ class TP1DraftModelRunner(ModelRunner):
         # Detect exec mode
         assert model_input.attn_metadata is not None
         use_cuda_graph = False
-        if model_input.attn_metadata.num_prefills > 0:
+        # TODO: important here!!!!
+        if model_input.attn_metadata['0'].num_prefills > 0:
             # In this case, execute_model(..) was called directly
             if num_steps > 1:
                 raise ValueError(
@@ -265,7 +270,7 @@ class TP1DraftModelRunner(ModelRunner):
                 not is_fallback)
 
             # Attn attr defines if we use cuda graphs
-            use_cuda_graph = model_input.attn_metadata.use_cuda_graph
+            use_cuda_graph = model_input.attn_metadata['0'].use_cuda_graph
 
         # Get model
         if use_cuda_graph:

@@ -41,6 +41,50 @@ from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 logger = init_logger(__name__)
 
 
+def split_kvcache_config(
+        kv_cache_config: KVCacheConfig) -> Tuple[KVCacheConfig, KVCacheConfig]:
+    if len(kv_cache_config.kv_cache_sharing) > 0:
+        raise NotImplementedError
+    draft_config = KVCacheConfig(
+        buffer_size=kv_cache_config.buffer_size,
+        buffer_dtype=kv_cache_config.buffer_dtype,
+        level0_page_size=kv_cache_config.level0_page_size,
+        components={},
+        block_table_sharing={},
+        kv_cache_sharing={})
+    target_config = KVCacheConfig(
+        buffer_size=kv_cache_config.buffer_size,
+        buffer_dtype=kv_cache_config.buffer_dtype,
+        level0_page_size=kv_cache_config.level0_page_size,
+        components={},
+        block_table_sharing={},
+        kv_cache_sharing={})
+    for layer_id, component in kv_cache_config.components.items():
+        if layer_id.startswith('d.'):
+            draft_config.components[layer_id[2:]] = component
+        elif layer_id.startswith('m.'):
+            target_config.components[layer_id[2:]] = component
+        else:
+            raise NotImplementedError
+    for group_id, layer_ids in kv_cache_config.block_table_sharing.items():
+        draft_list = []
+        target_list = []
+        for layer_id in layer_ids:
+            if layer_id.startswith('d.'):
+                draft_list.append(layer_id[2:])
+            elif layer_id.startswith('m.'):
+                target_list.append(layer_id[2:])
+            else:
+                raise NotImplementedError
+        if draft_list:
+            draft_config.block_table_sharing[group_id] = draft_list
+        if target_list:
+            target_config.block_table_sharing[group_id] = target_list
+    print("draft config", draft_config)
+    print("target config", target_config)
+    return draft_config, target_config
+
+
 def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     """Helper method that is the entrypoint for Executors which use
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
@@ -49,9 +93,15 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
     assert speculative_config is not None
 
+    kv_cache_config = kwargs.get("kv_cache_config")
+    draft_kv_cache_config, target_kv_cache_config = split_kvcache_config(
+        kv_cache_config)
+
     draft_worker_kwargs = kwargs.copy()
+    draft_worker_kwargs["kv_cache_config"] = draft_kv_cache_config
 
     kwargs["model_runner_cls"] = TargetModelRunner
+    kwargs["kv_cache_config"] = target_kv_cache_config
     target_worker = Worker(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
     # as per its value specified in the SpeculativeConfig.
@@ -82,6 +132,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         typical_acceptance_sampler_posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
+        fixed_acceptance_rate=speculative_config.fixed_acceptance_rate,
     )
 
     return spec_decode_worker
@@ -127,14 +178,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         typical_acceptance_sampler_posterior_alpha: float,
         disable_logprobs: bool,
         disable_log_stats: bool,
+        fixed_acceptance_rate: Optional[float],
     ) -> "SpecDecodeWorker":
-
         allow_zero_draft_token_step = True
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
         if ngram_prompt_lookup_max > 0:
+            print("proposer_worker = NGramWorker")
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
@@ -146,12 +198,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             if draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "mlp_speculator":
+                print("proposer_worker = MLPSpeculatorWorker")
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
             elif draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "medusa":
+                print("proposer_worker = MedusaWorker")
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
+                    print("proposer_runner = TP1DraftModelRunner")
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
@@ -161,8 +216,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                             "EAGLE does not support TP > 1 yet")
 
                     allow_zero_draft_token_step = False
+                print("proposer_worker = MultiStepWorker")
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
-
+            print("proposer_worker = SmallerTpProposerWorker")
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
 
@@ -171,7 +227,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
-            spec_decode_sampler = RejectionSampler()
+            spec_decode_sampler = RejectionSampler(
+                fixed_acceptance_rate=fixed_acceptance_rate)
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 posterior_threshold=\
@@ -371,6 +428,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_gpu_blocks)
         return new_num_gpu_blocks, num_cpu_blocks
 
+    def initialize_cache_from_kv_cache_config(
+            self,
+            kv_cache_config: KVCacheConfig,
+            buffer: Optional[torch.Tensor] = None) -> None:
+        if buffer is not None:
+            raise NotImplementedError
+        proposer_config, scorer_config = split_kvcache_config(kv_cache_config)
+        self.proposer_worker.initialize_cache_from_kv_cache_config(
+            proposer_config)
+        self.scorer_worker.initialize_cache_from_kv_cache_config(
+            scorer_config, buffer=self.proposer_worker.cache_engine[0].buffer)
+
     def get_available_memory(self) -> Tuple[int, int]:
         return self.scorer_worker.get_available_memory()
 
@@ -380,8 +449,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
-        self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
-                                              num_cpu_blocks=num_cpu_blocks)
+        self.proposer_worker.initialize_cache(
+            num_gpu_blocks=num_gpu_blocks,
+            num_cpu_blocks=num_cpu_blocks,
+            buffer=self.scorer_worker.cache_engine[0].buffer)
 
     @torch.inference_mode()
     def execute_model(
@@ -464,8 +535,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> bool:
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
-        return (execute_model_req.running_queue_size
-                >= self.disable_by_batch_size)
+        return (execute_model_req.running_queue_size >=
+                self.disable_by_batch_size)
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
@@ -646,6 +717,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        # SEE here
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer

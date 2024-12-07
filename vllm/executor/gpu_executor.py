@@ -1,5 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
+import torch
+
 from vllm.config import KVCacheConfig
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -134,11 +136,13 @@ class GPUExecutor(ExecutorBase):
         return self.driver_worker.get_available_memory()
 
     def initialize_cache_from_kv_cache_config(
-            self, kv_cache_config: KVCacheConfig) -> None:
+            self,
+            kv_cache_config: KVCacheConfig,
+            buffer: Optional[torch.Tensor] = None) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         self.driver_worker.initialize_cache_from_kv_cache_config(
-            kv_cache_config)
+            kv_cache_config, buffer)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

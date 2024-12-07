@@ -1,8 +1,8 @@
 from typing import List, Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
@@ -28,6 +28,7 @@ class TargetModelRunner(ModelRunner):
                  cache_config: CacheConfig,
                  load_config: LoadConfig,
                  lora_config: Optional[LoRAConfig],
+                 kv_cache_config: KVCacheConfig,
                  kv_cache_dtype: Optional[str] = "auto",
                  is_driver_worker: bool = False,
                  prompt_adapter_config: Optional[PromptAdapterConfig] = None,
@@ -49,6 +50,7 @@ class TargetModelRunner(ModelRunner):
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
             observability_config=observability_config,
+            kv_cache_config=kv_cache_config,
         )
 
     def prepare_model_input(

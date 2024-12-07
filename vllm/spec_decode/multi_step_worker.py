@@ -15,6 +15,7 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 
+# small model's worker
 class MultiStepWorker(Worker, ProposerWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
@@ -80,6 +81,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
             # Here we run the draft_model_runner with multi-step prepare
             # on the GPU directly
+            # run here (need check)
             expanded_request.num_steps = sample_len
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)

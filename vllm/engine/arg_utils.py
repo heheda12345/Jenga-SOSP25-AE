@@ -184,6 +184,7 @@ class EngineArgs:
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
     linear_chunk_size: int = 512
     log_mem_usage: bool = False
+    fixed_acceptance_rate: Optional[float] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -860,6 +861,12 @@ class EngineArgs:
             action='store_true',
         )
 
+        parser.add_argument(
+            '--fixed-acceptance-rate',
+            type=float,
+            default=None,
+        )
+
         return parser
 
     @classmethod
@@ -1037,6 +1044,7 @@ class EngineArgs:
             typical_acceptance_sampler_posterior_alpha=self.
             typical_acceptance_sampler_posterior_alpha,
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
+            fixed_acceptance_rate=self.fixed_acceptance_rate,
         )
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst

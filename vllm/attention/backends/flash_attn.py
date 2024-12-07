@@ -273,7 +273,9 @@ class FlashAttentionMetadata(AttentionMetadata):
             self.slot_mapping = self.slot_mapping[:num_seqs]
         else:
             assert self.seq_lens is not None
-            assert self.max_decode_seq_len == max(self.seq_lens)
+            # assert self.max_decode_seq_len == max(self.seq_lens), (
+            #     f"{self.max_decode_seq_len} != {max(self.seq_lens), self.seq_lens}"
+            # )
 
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0

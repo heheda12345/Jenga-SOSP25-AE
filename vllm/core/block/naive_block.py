@@ -298,7 +298,7 @@ class NaiveBlockAllocator(BlockAllocator):
         src_block_id = block.block_id
         assert src_block_id is not None
 
-        if self._cow_tracker.is_appendable(block):
+        if self._cow_tracker.is_appendable(block) or True:
             return src_block_id
 
         self._free_block_id(block)

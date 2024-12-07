@@ -128,6 +128,7 @@ class CacheEngineV3:
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
         kv_cache_config: KVCacheConfig,
+        buffer: Optional[torch.Tensor] = None,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -157,7 +158,7 @@ class CacheEngineV3:
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
-            self.device_config.device_type)
+            self.device_config.device_type, buffer)
         self.cpu_cache = None  # we do not need CPU cache in this prototype
 
     def get_per_layer_block_table(self, block_table: dict[str, torch.Tensor]):
@@ -166,6 +167,7 @@ class CacheEngineV3:
     def _allocate_kv_cache(
         self,
         device: str,
+        buffer: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Allocates KV cache on the specified device."""
         print("============CALL ALLOCATE KV CACHE")
@@ -179,10 +181,17 @@ class CacheEngineV3:
         logger.info("Free GPU memory: %d GB, Total GPU memory: %d GB",
                     free_gpu_memory / 1024 / 1024 / 1024,
                     total_gpu_memory / 1024 / 1024 / 1024)
-        buffer = torch.zeros((self.kv_cache_config.buffer_size, ),
-                             dtype=self.dtype,
-                             pin_memory=pin_memory,
-                             device=device)
+        if buffer is None:
+            buffer = torch.zeros((self.kv_cache_config.buffer_size, ),
+                                 dtype=self.dtype,
+                                 pin_memory=pin_memory,
+                                 device=device)
+        else:
+            print("reuse pre-allocated buffer")
+            assert buffer.shape == (self.kv_cache_config.buffer_size, )
+            assert buffer.dtype == self.dtype
+        self.buffer = buffer
+
         torch.cuda.synchronize()
         for layer_id, component in self.kv_cache_config.components.items():
             if isinstance(component, KVPageType):

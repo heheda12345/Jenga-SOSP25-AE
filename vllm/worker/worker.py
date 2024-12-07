@@ -251,6 +251,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def initialize_cache_from_kv_cache_config(
         self,
         kv_cache_config: Optional[KVCacheConfig],
+        buffer: Optional[torch.Tensor] = None,
     ) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
@@ -262,12 +263,14 @@ class Worker(LocalOrDistributedWorkerBase):
         #                             self.model_config.max_model_len)
 
         # avoid reading these attributes as they are useless
-        self.cache_config.__delattr__("num_gpu_blocks")
-        self.cache_config.__delattr__("num_cpu_blocks")
+        if hasattr(self.cache_config, "num_gpu_blocks"):
+            self.cache_config.__delattr__("num_gpu_blocks")
+        if hasattr(self.cache_config, "num_cpu_blocks"):
+            self.cache_config.__delattr__("num_cpu_blocks")
 
         self.kv_cache_config = kv_cache_config
         self.model_runner.set_kv_cache_config(kv_cache_config)
-        self._init_cache_engine(kv_cache_config)
+        self._init_cache_engine(kv_cache_config, buffer)
         self._warm_up_model()
 
     @torch.inference_mode()
@@ -347,7 +350,9 @@ class Worker(LocalOrDistributedWorkerBase):
         self._init_cache_engine(None)
         self._warm_up_model()
 
-    def _init_cache_engine(self, kv_cache_config: Optional[KVCacheConfig]):
+    def _init_cache_engine(self,
+                           kv_cache_config: Optional[KVCacheConfig],
+                           buffer: Optional[torch.Tensor] = None) -> None:
         if self.scheduler_config.use_per_layer_block_manager:
             self.cache_engine = [
                 CacheEngineV3(
@@ -356,6 +361,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     self.parallel_config,
                     self.device_config,
                     kv_cache_config,
+                    buffer,
                 ) for _ in range(self.parallel_config.pipeline_parallel_size)
             ]
         else:
