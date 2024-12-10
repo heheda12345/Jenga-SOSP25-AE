@@ -222,6 +222,10 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
 
+         # NOTE(shu): skip the profiling step
+        # free_gpu_memory = 40 * 1024 * 1024 * 1024
+        # total_gpu_memory = 80 * 1024 * 1024 * 1024
+        
         # free_gpu_memory = 40 * 1024 * 1024 * 1024
         # total_gpu_memory = 80 * 1024 * 1024 * 1024
 

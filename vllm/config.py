@@ -175,6 +175,8 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
+        self.num_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+        
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -688,6 +690,8 @@ class KVCacheConfig(msgspec.Struct, omit_defaults=True, array_like=True):
     buffer_dtype: torch.dtype
     level0_page_size: int
     components: Dict[str, ComponentType]  # layer_id -> ComponentType
+    
+    # NOTE: group ID --> group of layer ID --> layer ID (read from this config)
     block_table_sharing: Dict[str, List[str]]  # group_id -> List[layer_id]
     kv_cache_sharing: Dict[str, str]  # to_share_layer_id -> group_id
 

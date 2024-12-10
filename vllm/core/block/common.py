@@ -291,6 +291,18 @@ class BlockList:
         self._blocks.append(new_block)
         self._add_block_id(new_block.block_id)
 
+    def trim_block_token_ids(self, block_idx: int, token_ids_trim: int):
+        self._blocks[block_idx]._token_ids = self._blocks[block_idx]._token_ids[:token_ids_trim]
+        
+    def free_blocks(self, keep_track_idxes: List[int],):
+        for index in sorted(keep_track_idxes, reverse=True):
+            del self._blocks[index]
+            del self._block_ids[index]
+            del self._block_ids_for_exec[index]
+            
+        # print(f"Free blocks, now length of blocks and ids: {len(self._blocks)}, {len(self._block_ids)}, \
+        #     len of block ids for exec: {len(self._block_ids_for_exec)}")
+        
     def __len__(self) -> int:
         return len(self._blocks)
 

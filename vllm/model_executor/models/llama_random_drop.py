@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import torch
 from torch import nn
 from transformers import LlamaConfig
-
+import time
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig
@@ -57,10 +57,7 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
-
 # TEST code, to be removed later
-# NOTE: this is block manager for llama 
-# Return custom_managers to the manager 
 def custom_block_manager_for_llama(model_config: ModelConfig,
                                    cache_config: CacheConfig,
                                    parallel_config: ParallelConfig):
@@ -85,7 +82,7 @@ def custom_block_manager_for_llama(model_config: ModelConfig,
             #     cache_config.block_size)
             custom_managers[str(i)] = SelfAttentionTokenDropManager(
                 model_config, parallel_config, cache_config.cache_dtype,
-                cache_config.block_size, i, model_config.get)
+                cache_config.block_size, i, model_config.num_layers) # NOTE: also pass in layer ID
         else:
             custom_managers[str(i)] = SlidingWindowManager(
                 model_config, parallel_config, cache_config.cache_dtype,
@@ -334,7 +331,7 @@ class LlamaDecoderLayer(nn.Module):
         "inputs_embeds": 0,
         "intermediate_tensors": 0,
     })
-class LlamaModel(nn.Module):
+class LlamaForRandomDrop(nn.Module):
 
     def __init__(
         self,
@@ -504,7 +501,7 @@ class LlamaModel(nn.Module):
 
 
 @BLOCK_MANAGER_REGISTRY.register_block_manager(custom_block_manager_for_llama)
-class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class LlamaForRandomDropCasual(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -574,7 +571,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = LlamaModel(config,
+        self.model = LlamaForRandomDrop(config,
                                 cache_config,
                                 quant_config,
                                 lora_config=lora_config,

@@ -553,6 +553,8 @@ class Scheduler:
         swapped_out: List[SequenceGroup] = ret.swapped_out
 
         running_queue = self.running
+        # print(f"Running queue size: {len(running_queue)}")
+        
         assert len(self._async_stopped) == 0
         while running_queue:
             seq_group = running_queue[0]
@@ -656,6 +658,7 @@ class Scheduler:
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
+        # print(f"Decode, running batch: {len(ret.decode_seq_groups)}")
         return ret
 
     def _schedule_swapped(
@@ -1469,7 +1472,7 @@ class Scheduler:
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 self.free_seq(seq)
-                print("free seq", seq.seq_id)
+                # print("free seq", seq.seq_id)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
         if seq_group.is_finished():
@@ -1509,7 +1512,7 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
-            print("allocate seq", seq.seq_id, len(seq.get_token_ids()))
+            # print("allocate seq", seq.seq_id, len(seq.get_token_ids()))
 
     def _append_slots(self,
                       seq_group: SequenceGroup,

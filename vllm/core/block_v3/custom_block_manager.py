@@ -16,12 +16,13 @@ from vllm.core.block_v3.large_block_id_allocator import LargeBlockIDAllocator
 from vllm.core.evictor_v2 import Level0LRUEvictor
 from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
-from vllm.sequence import Sequence, SequenceGroup
+from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager, SharedBlockManager, SlidingWindowManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
+from vllm.core.top_k_utils import TopKCalculator
 
 logger = init_logger(__name__)
 
@@ -103,6 +104,10 @@ class CustomBlockManager:
             seq_id=-1, num_large_blocks_min={}, num_large_blocks_max={})
         self.global_block_allocator: Union[CpuGpuBlockAllocator,
                                            LargeBlockIDAllocator] = None
+        
+        # NOTE: intialize top K calculator here 
+        self.top_k_func = TopKCalculator()
+        print(f"Top K initialize once")
 
     def init_allocator(self):
         kv_cache_config = self._kv_cache_config
@@ -154,7 +159,7 @@ class CustomBlockManager:
                 for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
                 ):
                     schedule_component = kv_cache_schedule_config.groups[
-                        group_id]
+                        group_id]                    
                     allocator = NaiveBlockAllocator(
                         create_block=NaiveBlock,  # type: ignore
                         num_blocks=self.num_total_gpu_blocks *
@@ -430,7 +435,7 @@ class CustomBlockManager:
         for layer_id, manager in self._app_aware_managers.items():
             if isinstance(manager, SharedBlockManager):
                 layer_sharing.add(layer_id)
-                continue
+                continue 
             page_size = manager.get_page_size()
             if page_size not in group_result:
                 group_result[page_size] = {}
@@ -525,20 +530,31 @@ class CustomBlockManager:
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
+        ### NOTE: correspond to can_allocate()
         num_required_blocks: Dict[str,
                                   int] = {}  # group_id -> num_required_blocks
+        
+        # NOTE(shu): pre-calculate the top k (for all groups [layers])
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]   
+        is_prompt = seq_group.is_prefill()     
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=False)
+            
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             num_blocks = manager.get_num_required_blocks(
-                seq_group, num_lookahead_slots)
+                seq_group, num_lookahead_slots, 
+                top_k_wo_none_list # pass in top k wo none list 
+            )
             num_required_blocks[group_id] = num_blocks
 
+        # NOTE: disable this 
         if self.scheduler_config.enable_two_level_page:
             num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
                 num_required_blocks, seq_group.seqs[0].seq_id)
             total_blocks = sum(num_large_blocks_min.values())
         else:
+            # Sum up the calculation before 
             total_blocks = sum(num_required_blocks.values())
         return total_blocks
 
@@ -563,6 +579,15 @@ class CustomBlockManager:
                     ctx_stack.enter_context(
                         self.global_block_allocator._allocators[
                             Device.GPU].evictor.remove_by_mark_ctx())
+                    
+            # print(f"KV cache config block table sharing keys: {self.kv_cache_config.block_table_sharing.keys()}")
+            
+            # Pre-calculate and update the topK associated with it 
+            seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+            is_prompt = seq_group.is_prefill()
+            _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=False)
+            
+            
             for group_id in self.kv_cache_config.block_table_sharing.keys():
                 layer_ids = self.kv_cache_config.block_table_sharing[group_id]
                 manager = self._app_aware_managers[layer_ids[0]]
@@ -570,11 +595,16 @@ class CustomBlockManager:
                     allocator = self.group_allocators[group_id]
                 else:
                     allocator = self.global_block_allocator
+                    
+                # print(f"Group ID: {group_id} is in kv cache config")
+                # Pass in top k 
                 block = manager.allocate_sequence(seq_group, allocator,
-                                                  group_id)
+                                                  group_id, top_k_wo_none_list)
                 if block is not None:
                     block.set_block_id_multiplier(len(layer_ids))
                     block_table[group_id] = block
+                    
+            _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=True)
 
         if self.cache_config.enable_prefix_caching:
             self._computed_blocks_tracker.add_seq(seq_id)
@@ -585,14 +615,21 @@ class CustomBlockManager:
     def get_num_blocks_touched_by_append_slots(
             self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
             num_lookahead_slots: int) -> int:
+        
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt=False, seq=seq, update=False)
+        
+        ### NOTE: CAN APPEND SLOTs
         num_required_blocks: Dict[str,
                                   int] = {}  # group_id -> num_required_blocks
+        
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
             num_blocks = manager.get_num_blocks_touched_by_append_slots(
-                seq, block_table[group_id], num_lookahead_slots)
+                seq, block_table[group_id], num_lookahead_slots, group_id, 
+                top_k_wo_none_list, self.top_k_func)
+            
             num_required_blocks[group_id] = num_blocks
 
         if self.scheduler_config.enable_two_level_page:
@@ -601,20 +638,48 @@ class CustomBlockManager:
             total_blocks = sum(num_large_blocks_min.values())
         else:
             total_blocks = sum(num_required_blocks.values())
+            # print(f"[MANAGER][PREDICT] Total number of blocks touched by append slots: {total_blocks}")
         return total_blocks
 
     @require_kv_config_init
     def append_token_ids(self, seq: Sequence, block_table: CUSTOM_BLOCK_TABLE,
                          num_lookahead_slots: int) -> int:
+        
+        ### APPEND SLOTS
         if self.scheduler_config.enable_two_level_page:
             self.set_large_block_quota(seq.seq_id)
+            
+        from vllm.core.block.naive_block import clear_global_allocate_cnt
+        clear_global_allocate_cnt()
+        
+        prev_all_k = self.top_k_func.get_past_step_all_top_k(seq.seq_id)
+    
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt=False, seq=seq, update=False)
+            
         for group_id in self.kv_cache_config.block_table_sharing.keys():
             manager = self._app_aware_managers[
                 self.kv_cache_config.block_table_sharing[group_id][0]]
             assert group_id in block_table
+            # remaining_num_blocks = len(block_table._blocks)
+            # print(f"Before manager append ID, block size: {len(block_table[group_id]._blocks)}")
+            
+            # manager.append_token_ids(seq, block_table[group_id],
+            #                          num_lookahead_slots, group_id, 
+            #                          top_k_wo_none_list,
+            #                          self.top_k_func)
+            
             manager.append_token_ids(seq, block_table[group_id],
-                                     num_lookahead_slots)
-
+                                     num_lookahead_slots, group_id, 
+                                     top_k_wo_none_list,
+                                     prev_all_k)
+            
+        # UPDATE HERE:
+        # NOTICE: this is becase past_top_k needs to be accessed first 
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt=False, seq=seq, update=True)
+            # print(f"After manager append ID, block size: {len(block_table[group_id]._blocks)}")
+        # from vllm.core.block.naive_block import get_global_allocate_cnt
+        # print(f"[MANAGER][ACTUAL] Total number of blocks allocated: {get_global_allocate_cnt()}")
+        
     @require_kv_config_init
     def get_common_computed_block_ids(
             self, seq: Sequence,

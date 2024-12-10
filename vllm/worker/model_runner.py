@@ -489,7 +489,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
-
+ 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
@@ -900,8 +900,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             attn_metadata_groups = {}
             for group_id, attn_metadata_builder in self.attn_metadata_builders.items(
             ):
+                # NOTE: per layer attention metadata
                 attn_metadata_groups[group_id] = attn_metadata_builder.build(
                     seq_lens, query_lens, cuda_graph_pad_size, batch_size)
+                
             kv_cache_config = self.runner.kv_cache_config
             assert kv_cache_config is not None
             attn_metadata = {

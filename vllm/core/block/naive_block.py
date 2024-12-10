@@ -8,7 +8,15 @@ from vllm.core.block.null_block import NULL_BLOCK_SEQ_ID, NullBlock
 from vllm.core.block_v3.small_block_id_allocator import SmallBlockIDAllocator
 
 Refcount = int
+global_allocate_cnt = 0
 
+def clear_global_allocate_cnt():
+    global global_allocate_cnt
+    global_allocate_cnt = 0
+
+def get_global_allocate_cnt():
+    global global_allocate_cnt
+    return global_allocate_cnt
 
 class NaiveBlockAllocator(BlockAllocator):
     """A simple block allocator that manages blocks of memory without prefix
@@ -166,7 +174,7 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         # assert device is None
         # we can ignore _group_id_hash in naive block allocator
-        block_id = self._allocate_block_id(seq_id=seq_id,
+        block_id = self._allocate_block_id(seq_id=seq_id, 
                                            affine_only=affine_only)
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
@@ -178,18 +186,23 @@ class NaiveBlockAllocator(BlockAllocator):
     def _allocate_block_id(self,
                            seq_id: int,
                            affine_only: bool = False) -> BlockId:
+        
+        # global global_allocate_cnt
         if self.enable_two_level_page:
             block_id = self._block_id_allocator.allocate_block_id(
                 seq_id=seq_id, affine_only=affine_only)
         else:
             if not self._free_block_indices:
+                global global_allocate_cnt
+                print("global_allocate_cnt", global_allocate_cnt)
                 raise BlockAllocator.NoFreeBlocksError()
 
             block_id = self._free_block_indices.popleft()
         self._refcounter.incr(block_id)
+        global_allocate_cnt += 1
         return block_id
 
-    def _free_block_id(self, block: Block) -> None:
+    def _free_block_id(self, block: Block) -> None: 
         block_id = block.block_id
         assert block_id is not None
 

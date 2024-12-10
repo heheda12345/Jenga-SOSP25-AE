@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, TypeVar, Unio
 import numpy as np
 import torch
 
+import random
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.core.block_v3.custom_block import LinearAttentionManager
@@ -16,6 +17,8 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
     from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder
+
+from vllm.core.top_k_utils import cache_topk, cache_topk_wo_none
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -59,6 +62,61 @@ def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
         # start_idx = max(0, query_len - sliding_window)
     return start_idx
 
+def _compute_slot_mapping_python_top_k(
+                                 block_table: List[int], range_start: int,
+                                 range_end: int, block_size: int, seq_id: int, 
+                                 layer_id: int, is_prompt: bool):
+    
+    # for i in range(range_start, range_end):
+    #     block_number = block_table[i // block_size]
+    #     block_offset = i % block_size
+    #     slot = block_number * block_size + block_offset
+    #     slot_mapping.append(slot)
+    
+    # 6162
+    # Then: look at whether throw away or not 
+    
+    # print(f"Is prompt: {is_prompt}, seq id: {seq_id}, layer_id: {layer_id}")
+    # print(f"Seq id: {seq_id}, is prompt: {is_prompt}, block table: {block_table}")
+    # print(f"Compute slot mapping python, range start: {range_start}, range end: {range_end}")   
+    # print(f"Block table (length: {len(block_table)}): {block_table}, block table size: {block_size}")
+    
+    # if seq_id in cache_topk and len(cache_topk[seq_id]) > 0:
+    #     if layer_id == 0 and (seq_id == 0 or seq_id == "0"):
+    #         print(f"LAYER ID={layer_id}, Seq ID: {seq_id} - Cache top k in utils looks like: {cache_topk[seq_id]}")
+    #         print(f"Cache top k wo none in utils looks like: {cache_topk_wo_none[seq_id]}")
+    # else:
+    #     if layer_id == 0 and (seq_id == 0 or seq_id == "0"):
+    #         print(f"Cache topk looks like this: {cache_topk_wo_none} right now, seq id {seq_id} is not there")
+        
+    if not is_prompt and seq_id in cache_topk_wo_none:
+        k_in_this_layer = cache_topk_wo_none[seq_id][layer_id]
+    else:
+        k_in_this_layer = None 
+        
+    calc_slot_mapping = [] 
+    for i in range(range_start, range_end):
+        # block_number = block_table[i // block_size]
+        # TODO: bug fix here?? not sure whether this hard code will work
+        block_number = block_table[ (i // block_size) % len(block_table) ]
+        block_offset = i % block_size
+        
+        if is_prompt:
+            slot = block_number * block_size + block_offset
+        else:
+            # should just be one slot?
+            assert range_end - range_start == 1, f"Range end - range start: {range_end - range_start} should be 1"
+            block_number = block_table[-1]
+            
+            assert k_in_this_layer is not None, f"DECODE - K in this layer is None, should not be"
+            residual = k_in_this_layer % block_size
+            
+            block_offset_random = random.randint(0, max(residual - 1, 0))
+            slot = block_number * block_size + block_offset_random
+        
+        calc_slot_mapping.append(slot)
+    
+    return calc_slot_mapping
 
 def _compute_slot_mapping_python(slot_mapping: List[int],
                                  block_table: List[int], range_start: int,
@@ -82,6 +140,63 @@ def _compute_slot_mapping_numpy(slot_mapping: List[int],
     seq_slot_mapping_array += block_offset
     slot_mapping.extend(seq_slot_mapping_array)
 
+
+def compute_slot_mapping_top_k(is_profile_run: bool, slot_mapping: List[int],
+                         seq_id: int, seq_len: int, context_len: int,
+                         start_idx: int, block_size: int,
+                         block_table: List[int], layer_id: int, is_prompt: bool):
+    """
+    Compute slot mapping.
+    """
+    # TODO: fix bug here, why can it be None?
+    if slot_mapping is None:
+        slot_mapping = []
+            
+    if is_profile_run:
+        # During memory profiling, the block tables are not
+        # initialized yet. In this case, we just use a dummy
+        # slot mapping.
+        # In embeddings, the block tables are {seq_id: None}.
+    
+        slot_mapping.extend([PAD_SLOT_ID] * seq_len)
+        return slot_mapping
+
+    # Mask the [0, start_idx) tokens of the prompt with
+    # PAD_SLOT_ID, where start_idx is max(0, seq_len -
+    # sliding_window). For example, if the prompt len is 10,
+    # sliding window is 8, and block size is 4, the first two
+    # tokens are masked and the slot mapping will be
+    # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+    padding_mask_len = max(0, start_idx - context_len)
+    slot_mapping.extend([PAD_SLOT_ID] * padding_mask_len)
+
+    range_start = max(start_idx, context_len)
+    range_end = seq_len
+    numel = range_end - range_start
+
+    # NOTE: just use python implementation for now 
+    calc_slot_mapping = _compute_slot_mapping_python_top_k(block_table, range_start, \
+        range_end, block_size, seq_id, layer_id, is_prompt)
+    
+    # numpy implementation will be faster than python if we have
+    # many elements, otherwise it will be slower.
+    # if numel < _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL:
+    #     _compute_slot_mapping_python(slot_mapping, block_table, range_start,
+    #                                  range_end, block_size)
+    # else:
+    #     _compute_slot_mapping_numpy(slot_mapping, block_table, range_start,
+    #                                 range_end, block_size)
+    
+    # print(f"seq id: {seq_id}, layer id: {layer_id}")
+    topk = cache_topk[seq_id][layer_id]
+    if is_prompt: 
+        if topk is not None:
+            calc_slot_mapping = calc_slot_mapping[:topk]
+            calc_slot_mapping.extend([PAD_SLOT_ID] * (seq_len - topk))
+    
+    # extend the slot mapping 
+    slot_mapping.extend(calc_slot_mapping)    
+    return slot_mapping
 
 def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
                          seq_id: int, seq_len: int, context_len: int,

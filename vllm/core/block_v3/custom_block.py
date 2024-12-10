@@ -13,8 +13,9 @@ from vllm.core.block.prefix_caching_block import ComputedBlocksTracker, LastAcce
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, Device, cdiv, chunk_list, get_dtype_size
 from vllm.logger import init_logger
+import re 
 
-
+# NOTE: direct change 
 class AppAwareManager:
 
     def __init__(self, dtype: torch.dtype):
@@ -144,7 +145,226 @@ def prefix_to_null_block(block_table: BlockTable,
         # do not need to compute hash based on prev_blocks
         assert block_table._blocks[num_blocks]._cached_content_hash is not None
 
+### Below is the new manager for token drop experiments 
+# Initialize it once here?? not sure how to do it appropriately 
+# global top_k_func 
+# top_k_func = TopKCalculator()
+# print(f"Initialize top k (should be done once)")
 
+class SelfAttentionTokenDropManager(AppAwareManager):
+    def __init__(self, model_config: ModelConfig,
+                 parallel_config: ParallelConfig, cache_dtype: str,
+                 block_size: int, layer_id: int, num_layers: int):
+        super().__init__(get_dtype(cache_dtype, model_config))
+        self.memory_per_token = get_token_size_default(model_config,
+                                                       parallel_config,
+                                                       self.dtype)
+        self.block_size = block_size
+        self.layer_id = layer_id    
+        self.num_layers = num_layers
+
+    def get_page_size(self):
+        return self.block_size * self.memory_per_token
+
+    def get_app_property(self) -> str:
+        # Mapping: get_app_property layers group together 
+        # Now: different layers to be different 
+        # Group with group ID 
+        # print(f"Get app property: self_attention_{self.layer_id}")
+        return f"self_attention_({self.layer_id})"
+
+    def get_num_required_blocks(self,
+                                seq_group: SequenceGroup,
+                                num_lookahead_slots: int = 0,
+                                top_k_wo_none_list: List[int] = None) -> int: 
+        # NOTE: throw the k         
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]        
+        
+        num_k_in_this_layer = top_k_wo_none_list[self.layer_id]
+        assert num_k_in_this_layer <= len(seq.get_token_ids()), f"num_k_in_this_layer: {num_k_in_this_layer},\
+            len(seq.get_token_ids()): {len(seq.get_token_ids())}"
+            
+        num_tokens = num_k_in_this_layer
+        return cdiv(num_tokens + num_lookahead_slots, self.block_size)
+    
+    def allocate_sequence(self, seq_group: SequenceGroup,
+                          block_allocator: DeviceAwareBlockAllocator,
+                          group_id: str,
+                          top_k_wo_none_list: List[int] = None) -> BlockTable:    
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        
+        # assume group ID is the same as layer ID of this manager?
+        layer_extracted = re.search(r'\((.*?)\)', group_id).group(1)
+        assert layer_extracted == str(self.layer_id), f"group_id: {group_id}, layer_extracted: {layer_extracted}, layer_id: {layer_extracted}"
+        block_table = BlockTable(block_size=self.block_size,  
+                                 block_allocator=block_allocator,
+                                 max_block_sliding_window=None,
+                                 group_id=group_id,
+                                 seq_id=seq.seq_id)
+
+        num_k_in_this_layer = top_k_wo_none_list[self.layer_id]
+        assert num_k_in_this_layer <= len(seq.get_token_ids()), f"num_k_in_this_layer: {num_k_in_this_layer},\
+            len(seq.get_token_ids()): {len(seq.get_token_ids())}"
+        
+        block_table.allocate(seq.get_token_ids()[:num_k_in_this_layer])
+        return block_table
+
+    def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
+                                               block_table: BlockTable,
+                                               num_lookahead_slots: int,
+                                               group_id: str,
+                                               top_k_wo_none_list: List[int] = None,
+                                               top_k_func=None): 
+        assert block_table._block_size == self.block_size
+        
+        extracted_layer_id = re.search(r'\((.*?)\)', group_id).group(1)
+        assert int(extracted_layer_id) == self.layer_id, f"extracted_layer_id: {extracted_layer_id}, self.layer_id: {self.layer_id}"
+        
+        num_k_in_this_layer = top_k_wo_none_list[self.layer_id]
+        assert num_k_in_this_layer <= len(seq.get_token_ids()), f"num_k_in_this_layer: {num_k_in_this_layer},\
+            len(seq.get_token_ids()): {len(seq.get_token_ids())}"
+            
+        past_step_seq_layer_k = top_k_func.get_past_step_layer_top_k(seq.seq_id, self.layer_id)
+        sampled_token_ids = seq.get_token_ids()[:num_k_in_this_layer]
+        unseen_tokens = block_table.get_unseen_token_ids(sampled_token_ids)
+        
+        # This is the logic in can_append_slots() in the block_manager_v2.py
+        num_touched_blocks = 0
+        
+        if num_k_in_this_layer <= past_step_seq_layer_k:
+            num_touched_blocks = 1
+        else:
+            # Note: not sure about this logic?
+            num_token_ids = len(unseen_tokens) + num_lookahead_slots
+            first_chunk_size = self.block_size - (block_table._num_full_slots %
+                                                self.block_size)
+            num_token_blocks = (1 + math.ceil(
+                (num_token_ids - first_chunk_size) / self.block_size))
+            
+            num_touched_blocks += num_token_blocks
+            
+        return num_touched_blocks
+
+    def append_token_ids(self, seq: Sequence, block_table: BlockTable,
+                         num_lookahead_slots: int, group_id: str, 
+                         top_k_wo_none_list: List[int] = None,
+                        #  top_k_func=None,):
+                         prev_largest_ks: Dict[int, int] = None,):
+        # block_table._num_full_slots += len(unseen_token_ids)
+        assert block_table._block_size == self.block_size
+
+        # prev_largest_k = top_k_func.get_past_step_layer_top_k(seq.seq_id, self.layer_id)
+        prev_largest_k = prev_largest_ks[self.layer_id]
+        
+        # extracted_layer_id = group_id.split("_")[-1]
+        extracted_layer_id = re.search(r'\((.*?)\)', group_id).group(1)
+        assert int(extracted_layer_id) == self.layer_id, f"extracted_layer_id: {extracted_layer_id}, self.layer_id: {self.layer_id}"    
+                                            
+        current_largest_k = top_k_wo_none_list[self.layer_id]
+        tokens_to_append = current_largest_k - prev_largest_k
+                        
+        # NOTE: not sure whether this is the right way to do things...
+        token_ids = seq.get_token_ids()
+        sample_from_tokens_ids = token_ids[:current_largest_k]
+        
+        # This is basically len(token id length) - num_full_slots
+        sampled_unseen_tokens = block_table.get_unseen_token_ids(sample_from_tokens_ids) 
+        if len(sampled_unseen_tokens) == 0:
+            # NOTE: decode needs at least one unseen??? I don't know how it works
+            sampled_unseen_tokens = sample_from_tokens_ids[:1]
+                
+        if tokens_to_append is not None and tokens_to_append < 0:
+            null_block = block_table._allocator.allocate_or_get_null_block()
+            end_block_idx = len(block_table._blocks) # free the last num_blocks_to_free blocks
+            
+            blocks_needed = math.ceil(len(sample_from_tokens_ids) / self.block_size)
+            num_blocks_tot = end_block_idx
+            num_blocks_to_free = num_blocks_tot - blocks_needed
+            
+            free_cnt = 0
+            keep_track_idxes = [] 
+            for idx in range(end_block_idx-num_blocks_to_free, end_block_idx):
+                b = block_table._blocks[idx]
+                if b is not null_block:
+                    block_table._allocator.free(b)
+                    block_table._blocks[idx] = null_block
+                    keep_track_idxes.append(idx)
+                    free_cnt += 1 
+                else:
+                    raise ValueError(f"Block {b.block_id} is already null, error")
+            
+            block_table._blocks.free_blocks(keep_track_idxes)
+            
+            residual_length = len(sample_from_tokens_ids) % block_table._block_size 
+            # keep 1 slot for the last slot mapping to add??
+            block_table._blocks.trim_block_token_ids(-1, residual_length-1)     
+                        
+            assert free_cnt == num_blocks_to_free, f"free_cnt: {free_cnt}, num_blocks_to_free: {num_blocks_to_free}"
+            block_table._num_full_slots = len(sample_from_tokens_ids)-1 # ???
+                    
+        if tokens_to_append is not None and tokens_to_append == 0:
+            residual_length = len(sample_from_tokens_ids) % block_table._block_size
+            block_table._blocks.trim_block_token_ids(-1, residual_length-1) 
+            block_table._num_full_slots = len(sample_from_tokens_ids)-1 # ??????
+
+        block_table.ensure_num_empty_slots(num_empty_slots=len(sampled_unseen_tokens) +
+                                    num_lookahead_slots)
+                                    
+        # Update the blocks with the new tokens
+        # NOTE: set this to 0 now... not sure if it works        
+        if tokens_to_append is not None and tokens_to_append <= 0:
+            # Just append to the last block last one 
+            block_table._blocks.append_token_ids(-1, sampled_unseen_tokens)
+            # Previously have set num_full_slots, no need to update there
+        else:    
+            first_block_idx = block_table._num_full_slots // self.block_size
+            token_blocks = block_table._chunk_token_blocks_for_append(sampled_unseen_tokens) 
+            
+            # print(f"Token blocks calculated in actual: {len(token_blocks)}")
+            # print(f"Seq {seq.seq_id}, Layer {self.layer_id}, Append Token IDs TOUCH BLOCKS: {len(token_blocks)}")
+            for i, token_block in enumerate(token_blocks):
+                block_table._blocks.append_token_ids(first_block_idx + i, token_block)
+            
+            # originally here (NOTE)
+            #  block_table._num_full_slots += len(sampled_unseen_tokens)
+        
+        # Brought this out entirely??
+        block_table._num_full_slots += len(sampled_unseen_tokens)
+                
+    def get_prefix_cache_alignment(self) -> int:
+        return self.block_size
+
+    def get_possible_hit_lens(
+            self, block_is_computed: List[bool]) -> List[Tuple[int, int]]:
+        assert block_is_computed[-1] is False
+        hit_until = block_is_computed.index(False)
+        return [(0, hit_until * self.block_size)]
+
+    def filter_computed_blocks_by_token(
+            self, computed_tokens: int, block_table: BlockTable,
+            block_allocator: DeviceAwareBlockAllocator):
+        assert computed_tokens % self.block_size == 0
+        num_blocks = computed_tokens // self.block_size
+        suffix_to_mutable_block(block_table, block_allocator, num_blocks)
+        return block_table.physical_block_ids[:num_blocks]
+
+    def update_seq_blocks_last_access(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        last_access_blocks_tracker.update_seq_blocks_last_access(
+            seq.seq_id, block_table.physical_block_ids, self.group_id)
+
+    def free_skipped_blocks(
+            self, seq: Sequence, block_table: BlockTable,
+            last_access_blocks_tracker: LastAccessBlocksTracker):
+        pass
+
+    def get_block_size(self) -> int:
+        return self.block_size
+    
+################################################################
+
+# Model register: find the new manager 
 class SelfAttentionManager(AppAwareManager):
 
     def __init__(self, model_config: ModelConfig,
@@ -160,11 +380,15 @@ class SelfAttentionManager(AppAwareManager):
         return self.block_size * self.memory_per_token
 
     def get_app_property(self) -> str:
+        # Mappign: get_app_property layers group together 
+        # Now: different layers to be different 
+        # Group with group ID 
         return f"self_attention_{self.get_page_size()}"
 
     def get_num_required_blocks(self,
                                 seq_group: SequenceGroup,
                                 num_lookahead_slots: int = 0) -> int:
+        # NOTE: throw the k 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_tokens = len(seq.get_token_ids())
         return cdiv(num_tokens + num_lookahead_slots, self.block_size)
@@ -172,6 +396,8 @@ class SelfAttentionManager(AppAwareManager):
     def allocate_sequence(self, seq_group: SequenceGroup,
                           block_allocator: DeviceAwareBlockAllocator,
                           group_id: str) -> BlockTable:
+        # NOTE: throw the k 
+        # model.py register - layer id --> layer grouping 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         block_table = BlockTable(block_size=self.block_size,
                                  block_allocator=block_allocator,
@@ -184,7 +410,8 @@ class SelfAttentionManager(AppAwareManager):
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
                                                block_table: BlockTable,
-                                               num_lookahead_slots: int):
+                                               num_lookahead_slots: int,
+                                               group_id: str): 
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
             seq.get_token_ids())
@@ -290,8 +517,10 @@ class EncoderDecoderManager(AppAwareManager):
             block_table.allocate(encoder_seq_token_ids)
         return block_table
 
-    def get_num_blocks_touched_by_append_slots(self, seq, block_table,
-                                               num_lookahead_slots):
+    def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
+                                               block_table: BlockTable,
+                                               num_lookahead_slots: int,
+                                               group_id: str): 
         # Encoder-decoder KV cache size is not changed during decoding
         return 0
 
@@ -392,7 +621,8 @@ class SlidingWindowManager(AppAwareManager):
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
                                                block_table: BlockTable,
-                                               num_lookahead_slots: int):
+                                               num_lookahead_slots: int,
+                                               group_id: str): 
         # TODO: this function may add redundant blocks to the block table
         assert block_table._block_size == self.block_size
         unseen_token_ids = block_table.get_unseen_token_ids(
@@ -583,7 +813,8 @@ class LinearAttentionManager(AppAwareManager):
 
     def get_num_blocks_touched_by_append_slots(self, seq: Sequence,
                                                block_table: BlockTable,
-                                               num_lookahead_slots: int):
+                                               num_lookahead_slots: int,
+                                               group_id: str): 
         return 0
 
     def append_token_ids(self, seq: Sequence, block_table: BlockTable,

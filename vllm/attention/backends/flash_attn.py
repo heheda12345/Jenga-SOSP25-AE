@@ -12,9 +12,12 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
+                                           compute_slot_mapping_top_k,
                                            is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import Timer, async_tensor_h2d, check_tensor, make_tensor_with_pad
+from vllm.core.top_k_utils import cache_topk_wo_none
+import re 
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -345,7 +348,12 @@ class FlashAttentionMetadataBuilder(
         self.use_per_layer_block_manager = (
             input_builder.scheduler_config.use_per_layer_block_manager)
 
+        # NOTE: such a metadata per group 
         self.group_id = group_id
+        # self.layer_id = int(group_id.split("_")[-1]) if group_id is not None else None
+        self.layer_id = int(re.search(r'\((.*?)\)', group_id).group(1)) if group_id is not None else None
+        
+        # print(f"Initialize flash attention slot mapping: {self.slot_mapping}, group ID: {self.group_id}, layer ID: {self.layer_id}")
         self.app_attn_metadata_builder = app_attn_metadata_builder
         if self.use_per_layer_block_manager:
             assert self.app_attn_metadata_builder is not None
@@ -359,6 +367,7 @@ class FlashAttentionMetadataBuilder(
         2. block table.
         3. slot mapping.
         """
+        # import pdb; pdb.set_trace()
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
@@ -411,15 +420,25 @@ class FlashAttentionMetadataBuilder(
             if is_profile_run:
                 block_table_for_slot = None
             elif self.use_per_layer_block_manager:
+                # NOTE: this is metadata per sequence per layer? 
                 block_table_for_slot = inter_data.block_tables[seq_id][
                     self.group_id]
                 block_table_for_slot = [2 * x for x in block_table_for_slot]
             else:
                 block_table_for_slot = inter_data.block_tables[seq_id]
 
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+            # compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+            #                      seq_len, context_len, start_idx,
+            #                      self.block_size, block_table_for_slot)
+            
+            # block_table_for_slot: block table maintained per seq_id and layer_id
+            
+            # layer ID is the number after the last "-" in the group ID
+
+            # print(f"Group ID: {self.group_id}, Layer ID: {self.layer_id}")
+            self.slot_mapping = compute_slot_mapping_top_k(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
-                                 self.block_size, block_table_for_slot)
+                                 self.block_size, block_table_for_slot, self.layer_id, is_prompt)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -460,10 +479,15 @@ class FlashAttentionMetadataBuilder(
             inter_data.prefix_cache_hit
             for inter_data in self.input_builder.inter_data_list
         ])
+        
+        seq_ids = []
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
+            
+            # NOTE: not sure if this is correct 
+            seq_ids.extend(inter_data.seq_ids)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -479,6 +503,14 @@ class FlashAttentionMetadataBuilder(
         num_decode_tokens = self.num_decode_tokens
 
         num_seqs = len(seq_lens)
+        
+        # NOTE: change things here 
+        assert num_seqs == len(seq_ids), f"Number of seqs: {num_seqs}, Number of seq_ids: {len(seq_ids)}"
+        for i in range(num_seqs):
+            seq_id = seq_ids[i]
+            if seq_id in cache_topk_wo_none:
+                seq_lens[i] = cache_topk_wo_none[seq_id][self.layer_id]
+                
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
@@ -501,8 +533,16 @@ class FlashAttentionMetadataBuilder(
                                            self.runner.pin_memory)
         query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
                                              self.runner.pin_memory)
+        
+        # print(f"Slot mapping tensor looks like: {self.slot_mapping}")
+        # import traceback 
+        # print(f"Trace back where slot mapping is created: {traceback.format_stack()}")
+            
         slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
                                                device, self.runner.pin_memory)
+        
+        # print(f"seq lens ({len(seq_lens)}): {seq_lens}, seq lens tensor shape: {seq_lens_tensor.shape}")
+        
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -587,7 +627,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
-        print("sliding_window", self.sliding_window)
+        # print("sliding_window", self.sliding_window)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -648,7 +688,7 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             raise ValueError("kv_cache of type {} is not supported.".format(
                 type(kv_cache)))
-
+        
         output = torch.ops.vllm.unified_flash_attention(
             query,
             key,
@@ -665,7 +705,7 @@ class FlashAttentionImpl(AttentionImpl):
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
-            layer_id,
+            str(layer_id),
         )
 
         return output
@@ -695,7 +735,7 @@ def unified_flash_attention(
     current_metadata_ctx = get_forward_context()
     assert current_metadata_ctx is not None
     if layer_id is not None:
-        current_metadata = current_metadata_ctx[layer_id]
+        current_metadata = current_metadata_ctx[str(layer_id)]
     else:
         current_metadata = current_metadata_ctx
     assert isinstance(current_metadata, FlashAttentionMetadata)
@@ -706,7 +746,6 @@ def unified_flash_attention(
     query = query.view(-1, num_heads, head_size)
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
-    # print("slot_mapping", attn_metadata.slot_mapping)
 
     if key_cache.numel() > 0:
         # Reshape the input keys and values and store them in the cache.
@@ -865,17 +904,35 @@ def unified_flash_attention(
             #     timer_self_decode.start()
             # else:
             #     timer_window_decode.start()
+            # print(f"xxx"*10)
+            # print(f"Layer ID: {layer_id}")
+            # print(f"Decode q shape: {decode_query.unsqueeze(1).shape}, k_cache shape: {key_cache.shape}, v_cache shape: {value_cache.shape}")
+            # print(f"Block table: block table shape: {decode_meta.block_tables[0].shape}")
+            # print(f"Cache seq lens: {decode_meta.seq_lens_tensor}")
+            # print(f"xxx"*10)
+            
+            # print(f"block table shape: {decode_meta.block_tables.shape}, seq len tensor looks like: {decode_meta.seq_lens_tensor}")
+            # print(f"seq length tensor shape: {decode_meta.seq_lens_tensor.shape}")
+            # print(f"max of block_tables: {torch.max(decode_meta.block_tables)}")
+            # print(f"min of block tables: {torch.min(decode_meta.block_tables)}")
+            # print(f"k cache shape: {key_cache.shape}")
+            # print(f"Q shape: {decode_query.unsqueeze(1).shape}")
+            
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
                 v_cache=value_cache,
+                # block_table=torch.zeros_like(decode_meta.block_tables),
+                # block_table=torch.min(decode_meta.block_tables, 60000),
                 block_table=decode_meta.block_tables,
                 cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=softmax_scale,
                 causal=True,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
-                window_size=window_size).squeeze(1)
+                window_size=window_size
+            ).squeeze(1)
+            
             # torch.cuda.synchronize()
             # if window_size[0] == -1:
             #     t = timer_self_decode.log()
