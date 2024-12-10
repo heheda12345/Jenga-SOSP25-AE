@@ -17,6 +17,8 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
+import traceback 
+
 logger = init_logger(__name__)
 
 # Test-only. If configured, decode is preempted with
@@ -314,6 +316,10 @@ class Scheduler:
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
+        
+        if self.scheduler_config.use_v3_block_manager:
+            version = "v3"
+            
         if (self.scheduler_config.embedding_mode
                 or self.cache_config.is_attention_free):
             version = "placeholder"
@@ -397,7 +403,7 @@ class Scheduler:
         self._async_stopped: List[SequenceGroup] = []
 
         self._cache_hit_tokens: Dict[int, int] = {} # {block_id: num_tokens}
-
+        
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -644,6 +650,7 @@ class Scheduler:
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
+        # print(f"Decode, running batch: {len(ret.decode_seq_groups)}")
         return ret
 
     def _schedule_swapped(
@@ -880,6 +887,7 @@ class Scheduler:
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
+            # NOTE: is it schedule sequence group one by one?
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -910,6 +918,7 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
+            # NOTE: do we need to change this 
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
@@ -992,7 +1001,7 @@ class Scheduler:
         it batches as many prefill requests as possible. And it schedules
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
-        """
+        """ 
         # Include running requests to the budget.
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
@@ -1120,7 +1129,7 @@ class Scheduler:
         # Schedule swapped out requests.
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
-                running_scheduled.swapped_out) == 0:
+                running_scheduled.swapped_out) == 0: 
             swapped_in = self._schedule_swapped(budget, curr_loras)
 
         # Schedule new prefills.
@@ -1175,9 +1184,13 @@ class Scheduler:
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
+        # stack = traceback.format_stack()
+        # print(f"Stack trace: {stack}")
+         
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
+            # NOTE: for token drop experiment, we use the default scheduling
             return self._schedule_default()
 
     def _can_append_slots(self, seq_group: SequenceGroup,
@@ -1263,7 +1276,7 @@ class Scheduler:
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
-
+            
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
@@ -1386,6 +1399,7 @@ class Scheduler:
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 self.free_seq(seq)
+                # print("free seq", seq.seq_id)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
         if seq_group.is_finished():
@@ -1421,11 +1435,13 @@ class Scheduler:
 
             self._async_stopped.clear()
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:      
+        # NOTE: how should we change this?
+        # Set once before prefill   
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
-
+  
     def _append_slots(self,
                       seq_group: SequenceGroup,
                       blocks_to_copy: List[Tuple[int, int]],
@@ -1459,7 +1475,7 @@ class Scheduler:
             seq_status = None
 
         for seq in seq_group.get_seqs(status=seq_status):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(seq, num_lookahead_slots, is_prefill)
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
 
@@ -1644,6 +1660,7 @@ class Scheduler:
                 # When prefix caching is enabled, we always allocate
                 # the number of new tokens that is dividable by the block
                 # size to avoid partial block matching.
+                # NOTE (shu): should disable prefix caching?
                 block_size = self.cache_config.block_size
                 remainder = budget.token_budget % block_size
                 if remainder != 0:

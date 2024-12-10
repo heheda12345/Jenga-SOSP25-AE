@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import traceback 
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -260,7 +261,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.computed_block_nums = computed_block_nums
             self.n_seqs = n_seqs
             self.encoder_seq_len = encoder_seq_len
-
+            
             if reinit:
                 if len(self.seq_ids) == 1 and reinit_use_defaults:
                     self.simple_reinit()
@@ -426,9 +427,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.per_seq_group_compute_fns = [
             self._compute_prompt_adapter_input,
             self._compute_multi_modal_input,
-        ]
-
+        ]        
         self.runner = runner
+        # NOTE: random drop hack 
+        self.seq_len_to_keep = self.runner.seq_len_to_keep
+        self.prefill_config = self.runner.model_config.prefill_config   
+        self.gen_config = self.runner.model_config.gen_config
+        # TODO: this works with Llama
+        self.num_layers = self.runner.model_config.num_layers
+        # print(f"num_layers: {self.num_layers}")
+        
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
         self.scheduler_config = self.runner.scheduler_config
@@ -459,6 +467,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 self.sliding_window + self.block_size - 1) // self.block_size
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
+
 
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
@@ -696,6 +705,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_config.is_encoder_decoder_model:
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
+        # TODO (shu): just add to seq_group_metadata 
+        # TODO (shu): then basically follow and pass it to inter_data 
+        # Access this within `add_seq_group` to update slot_mapping.
         inter_data = self.init_cached_inter_data(
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
@@ -977,7 +989,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-
+        
+        # NOTE: random drop hack
+        self.seq_len_to_keep = self.model_config.seq_len_to_keep
         self.kv_cache_dtype = kv_cache_dtype
         # self.sliding_window = model_config.get_sliding_window()
         self.sliding_window = None # hack for gemma2
@@ -1590,6 +1604,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        # print(f"This is access")
+        # stack = traceback.format_stack()
+        # print(f"Stack trace (prepare): {stack}")
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:

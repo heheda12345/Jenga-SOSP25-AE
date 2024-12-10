@@ -2,11 +2,11 @@ import enum
 from abc import ABC, abstractmethod
 from typing import List
 from typing import Sequence as GenericSequence
-from typing import Tuple
+from typing import Tuple, Optional
 
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.utils import Device
-
+from vllm.core.topk_utils import TopKCalculator
 
 class AllocStatus(enum.Enum):
     """Result for BlockSpaceManager.can_allocate
@@ -36,6 +36,10 @@ class BlockSpaceManager(ABC):
             from vllm.core.block_manager_v2 import BlockSpaceManagerV2
             return BlockSpaceManagerV2
 
+        if version == "v3":
+            from vllm.core.block_manager_v3 import BlockSpaceManagerV3
+            return BlockSpaceManagerV3
+        
         if version == "placeholder":
             from vllm.core.placeholder_block_space_manager import (
                 PlaceholderBlockSpaceManager)
@@ -46,7 +50,8 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def can_allocate(self,
                      seq_group: SequenceGroup,
-                     num_lookahead_slots: int = 0) -> AllocStatus:
+                     num_lookahead_slots: int = 0,
+                     topK_func: Optional[TopKCalculator] = None) -> AllocStatus:
         pass
 
     @abstractmethod

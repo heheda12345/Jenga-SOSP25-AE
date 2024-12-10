@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-
+import time 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
@@ -11,10 +11,14 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
+                                           compute_slot_mapping_top_k,
+                                           compute_slot_mapping_old_recalc,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import Timer, async_tensor_h2d, make_tensor_with_pad
+
+from vllm.core.topk_utils import cache_topk_wo_none
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -113,6 +117,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
     # seq_lens stored as a tensor.
+    
     seq_lens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
@@ -178,11 +183,17 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_start_loc is not None
 
+        # Now pass in slot_mapping is each element of the list, [:self.num_prefill_tokens]
+        # NOTE: Update this to be per layer 
+        # Originally 
+        # pass_in_slot_mapping = self.slot_mapping[:self.num_prefill_tokens]
+        # print(f"Prefill metadata slot mapping shape: {len(self.slot_mapping)}, each element shape: {len(self.slot_mapping[0])} num_prefill_tokens: {self.num_prefill_tokens}")
+        pass_in_slot_mapping = [i[:self.num_prefill_tokens] for i in self.slot_mapping]
         self._cached_prefill_metadata = FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
-            slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            slot_mapping=pass_in_slot_mapping,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -207,13 +218,30 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
 
+        # pass_in_slot_mapping = [i[self.num_prefill_tokens:] for i in self.slot_mapping]
+        # pass_in_seq_lens = self.seq_lens_tensor[self.num_prefills:]
+        # top_k_calc = cache_topk_wo_none[0]
+        # max_top_k = max(top_k_calc)
+        # print(f"Decode metadata, cache top k wo none: {top_k_calc}, max top k: {max_top_k}")
+        # # pass_in_seq_lens_topk = random.sample(pass_in_seq_lens, max_top_k)
+        # # is this seq_lens_tensor only have one element??
+        # assert self.seq_lens_tensor.shape[0] == 1
+        # self.seq_lens_tensor = torch.tensor([max_top_k], device=self.seq_lens_tensor.device, dtype=self.seq_lens_tensor.dtype)
+        # print(f"Decode metadata, update seq lens tensor to be {self.seq_lens_tensor}")
+        
+        # originally
+        # pass_in_slot_mapping = self.slot_mapping[self.num_prefill_tokens:]  
+        # print(f"Before pass in decode, slot mapping looks like: {self.slot_mapping}") 
+        # print(f"Prefill metadata slot mapping shape: {len(self.slot_mapping)}, each element shape: {len(self.slot_mapping[0])} num_prefill_tokens: {self.num_prefill_tokens}") 
+        # print(f"Decode metadata, use cuda graph: {self.use_cuda_graph}")
         self._cached_decode_metadata = FlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
-            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            slot_mapping=[i[self.num_prefill_tokens:] for i in self.slot_mapping], # NOTE: Update this to be per layer 
             seq_lens=None,
-            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            # pass_in_seq_lens = self.seq_lens_tensor[self.num_prefills:] (original)
+            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:], # decode, num_prefills: 0 
             max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
@@ -237,7 +265,9 @@ class FlashAttentionMetadata(AttentionMetadata):
                      turn_prefills_into_decodes: bool = False):
         """
         Update metadata in-place to advance one decode step.
+        NOTE: very problematic function here 
         """
+        raise NotImplementedError("advance_step is not implemented for FlashAttentionMetadata")
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
@@ -256,8 +286,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             self.num_prefill_tokens = 0
             self.max_prefill_seq_len = 0
             self.max_query_len = 1
-
-            self.slot_mapping = self.slot_mapping[:num_seqs]
+            
+            # NOTE: Update this to be per layer 
+            # self.slot_mapping = self.slot_mapping[:num_seqs]
+            self.slot_mapping = [i[:num_seqs] for i in self.slot_mapping]
         else:
             assert self.seq_lens is not None
             assert self.max_decode_seq_len == max(self.seq_lens)
@@ -265,8 +297,11 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.num_prefills == 0
         assert self.num_prefill_tokens == 0
         assert self.num_decode_tokens == num_seqs
-        assert self.slot_mapping.shape == (num_seqs, )
-
+        
+        # NOTE: Update this to be per layer 
+        # assert self.slot_mapping.shape == (num_seqs, )
+        assert self.slot_mapping[0].shape == (num_seqs, )
+        
         assert self.seq_lens is not None
         assert len(self.seq_lens) == num_seqs
         assert self.seq_lens_tensor is not None
@@ -301,12 +336,17 @@ class FlashAttentionMetadata(AttentionMetadata):
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
 
+global past_kv_seq_lens
+global recent_attn_weights_last_shape_list 
+past_kv_seq_lens = None 
+recent_attn_weights_last_shape_list = None
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-        self.slot_mapping: List[int] = []
+        # List[List[int]]: The slot mapping for each layer 
+        self.slot_mapping: List[List[int]] = []
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
@@ -322,6 +362,14 @@ class FlashAttentionMetadataBuilder(
         self.block_size = input_builder.block_size
         self.use_v2_block_manager = (
             input_builder.scheduler_config.use_v2_block_manager)
+        
+        
+        # NOTE: for token drop 
+        # prefill and decode config 
+        self.num_layers = input_builder.num_layers
+        self.seq_len_to_keep = input_builder.seq_len_to_keep
+        self.prefill_config = input_builder.prefill_config
+        self.gen_config = input_builder.gen_config
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -331,9 +379,12 @@ class FlashAttentionMetadataBuilder(
         2. block table.
         3. slot mapping.
         """
+        global past_kv_seq_lens
+        global recent_attn_weights_last_shape_list
+    
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
-
+        
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
@@ -369,14 +420,48 @@ class FlashAttentionMetadataBuilder(
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
+            
+            # Check if block_tables is None or a dictionary with all None values.
             is_profile_run = is_block_tables_empty(block_tables)
+            
+            # Compute the start index of slot mapping.
+            # start_idx = compute_slot_mapping_start_idx(
+            #     is_prompt, query_len, context_len, self.sliding_window,
+            #     self.use_v2_block_manager)
+            
+            # Compute slot mapping.
+            # print(f"Pass in: past kv seqs {past_kv_seq_lens}, recent attn {recent_attn_weights_last_shape_list}")
+            # self.slot_mapping, past_kv_seq_lens, recent_attn_weights_last_shape_list = compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+            #                      seq_len, context_len, start_idx,
+            #                      self.block_size, inter_data.block_tables, 
+            #                      self.num_layers, self.prefill_config, self.gen_config,
+            #                      past_kv_seq_lens, recent_attn_weights_last_shape_list)
+            
+            # NOTE: very old version, recalculate and keep track of everything 
+            # self.slot_mapping, past_kv_seq_lens, recent_attn_weights_last_shape_list = compute_slot_mapping_old_recalc(
+            #         is_profile_run, self.slot_mapping, seq_id,
+            #         seq_len, context_len, start_idx,
+            #         self.block_size, inter_data.block_tables, 
+            #         self.num_layers, self.prefill_config, self.gen_config,
+            #         past_kv_seq_lens, recent_attn_weights_last_shape_list
+            # )
+            
+            # NOTE: latest version 
             start_idx = compute_slot_mapping_start_idx(
                 is_prompt, query_len, context_len, self.sliding_window,
                 self.use_v2_block_manager)
-            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
-                                 seq_len, context_len, start_idx,
-                                 self.block_size, inter_data.block_tables)
-
+            
+            # Now self.slot_mapping is a List[List[int]] where 
+            # - outer list is per layer
+            # - inner list is per token [seq_1_t1_slot, seq_1_t2_slot, ..., seq_2_t1_slot, seq_2_t2_slot, ...]
+            self.slot_mapping = compute_slot_mapping_top_k(
+                is_profile_run, self.slot_mapping, self.num_layers,
+                seq_id, seq_len, context_len, start_idx,
+                self.block_size, inter_data.block_tables, 
+            )
+            
+            # print(f"After compute, slot mapping looks like: {self.slot_mapping}")  
+            
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
             block_tables: List[List[int]]) -> torch.Tensor:
@@ -412,14 +497,23 @@ class FlashAttentionMetadataBuilder(
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
+        # import traceback 
+        # stack = traceback.format_stack()
+        # print(f"Stack trace (build): {stack}")
+        
+        st = time.time()
+        
         prefix_cache_hit = any([
             inter_data.prefix_cache_hit
             for inter_data in self.input_builder.inter_data_list
         ])
+        seq_ids = [] 
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
+            # NOTE: not sure if this is correct 
+            seq_ids.extend(inter_data.seq_ids)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
@@ -435,8 +529,27 @@ class FlashAttentionMetadataBuilder(
         num_decode_tokens = self.num_decode_tokens
 
         num_seqs = len(seq_lens)
+        # print(f"Num seqs: {num_seqs}, seq lens looks like: {seq_lens}")
+        
+        # NOTE: change things here 
+        assert num_seqs == len(seq_ids), f"Num seqs: {num_seqs}, seq ids: {len(seq_ids)}"
+        for i in range(num_seqs):
+            seq_id = seq_ids[i] 
+            if seq_id in cache_topk_wo_none:
+                seq_lens[i] = max(cache_topk_wo_none[seq_ids[i]])   
+        
+        # print(f"Use capture graph? {use_captured_graph}")
         if use_captured_graph:
-            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+            
+            # TODO(shu): if use CUDA graph, need to update the slot mapping logic for token drop 
+            # self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+            # for each layer, add the pad slot id
+            for i in range(self.num_layers):
+                self.slot_mapping[i].extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+                # print(f"Slot mapping for layer {i} looks like: {self.slot_mapping[i]}")
+            
+            # print(f"Self slot mapping with captured graph looks like {self.slot_mapping}")
+                
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
             block_tables = self._get_graph_runner_block_tables(
@@ -453,12 +566,24 @@ class FlashAttentionMetadataBuilder(
         assert device is not None
         context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
                                                device, self.runner.pin_memory)
+        
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
+         
+        
         query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
                                              self.runner.pin_memory)
-        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
-                                               device, self.runner.pin_memory)
+        
+        # print(f"seq lens ({len(seq_lens)}): {seq_lens}, seq lens tensor shape: {seq_lens_tensor.shape}")
+        # slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+        #                                        device, self.runner.pin_memory)
+        # NOTE: per layer token drop (slot mapping)
+            
+        slot_mapping_tensor = [
+            async_tensor_h2d(layer_slot_mapping, torch.long, device, self.runner.pin_memory)
+            for layer_slot_mapping in self.slot_mapping
+        ]
+
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -474,6 +599,7 @@ class FlashAttentionMetadataBuilder(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        # print(f"Flash attention metadata build time: {time.time() - st}")
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -549,6 +675,9 @@ class FlashAttentionImpl(AttentionImpl):
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
+        
+        # TODO: add eager (later talk about cuda graph)
+        # TODO: per-layer token drop for different metadata.slot_mapping List[Tensor]
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -569,7 +698,8 @@ class FlashAttentionImpl(AttentionImpl):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
-    ) -> torch.Tensor:
+        layer_id: int = None, 
+    ) -> torch.Tensor: 
         """Forward pass with FlashAttention.
 
         Args:
@@ -583,6 +713,7 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        st = time.time()
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -605,15 +736,13 @@ class FlashAttentionImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.scale,
+            layer_id,
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
         )
-
+        # print(f"Self attention forward time: {time.time() - st}")
         return output
-
-layer_id: int = 0
-prefill_id: int = 0
 
 @torch.library.custom_op("vllm::unified_flash_attention",
                          mutates_args=["kv_cache"])
@@ -629,6 +758,7 @@ def unified_flash_attention(
     k_scale: float,
     v_scale: float,
     softmax_scale: float,
+    layer_id: int,
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
@@ -652,17 +782,22 @@ def unified_flash_attention(
         # Reshape the input keys and values and store them in the cache.
         # If kv_cache is not provided, the new key and value tensors are
         # not cached. This happens during the initial memory profiling run.
+        
+        # print(f"Attn slot mapping for layer {layer_id}: get length of slot mapping {len(attn_metadata.slot_mapping[layer_id])}")
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
             kv_cache[0],
             kv_cache[1],
-            attn_metadata.slot_mapping.flatten(),
+            # attn_metadata.slot_mapping.flatten(), # TODO: change to per layer 
+            attn_metadata.slot_mapping[layer_id].flatten(),
             kv_cache_dtype,
             k_scale,
             v_scale,
         )
-
+        
+        # TODO: keep track - top K does not drop 
+            
     num_prefill_tokens = attn_metadata.num_prefill_tokens
     num_decode_tokens = attn_metadata.num_decode_tokens
     assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
@@ -763,8 +898,9 @@ def unified_flash_attention(
             #           f"cu_seq_lens_q: {prefill_meta.query_start_loc}",
             #           f"cu_seq_lens_k: {prefill_meta.seq_start_loc}")
         # if kv_cache.numel() > 0:
-        #     torch.save(prefill_output, f"pts/prefill_output_{prefill_id}.pt")
+        #     # torch.save(prefill_output, f"pts/prefill_output_{prefill_id}.pt")
         #     prefill_id = prefill_id + 1
+        #     print("prefill_id", prefill_id)    
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
@@ -798,9 +934,6 @@ def unified_flash_attention(
             # Use flash_attn_with_kvcache for normal decoding.
             # print("decode_query", decode_query.unsqueeze(1).shape)
             # global layer_id
-            # print("layer_id", layer_id)
-            # print("decode_shape", decode_query.shape, key_cache.shape,
-            #       value_cache.shape)
             # print("block_table", decode_meta.block_tables)
             # print("cache_seqlens", decode_meta.seq_lens_tensor)
             # print("window_size", window_size)

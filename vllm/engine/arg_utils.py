@@ -108,6 +108,11 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
+    
+    # NOTE: token drop experiments 
+    # NOTE (shu): this corresponds to v3 manager? 
+    # use_per_layer_block_manager: bool = False
+    
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
@@ -179,7 +184,7 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
-
+    
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -1023,6 +1028,7 @@ class EngineArgs:
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
+            # use_v3_block_manager=self.use_per_layer_block_manager, # v3 is per layer
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,

@@ -15,6 +15,7 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.core.topk_utils import TopKCalculator
 
 logger = init_logger(__name__)
 
@@ -281,9 +282,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _get_seq_num_required_blocks(self, seq: Optional[Sequence]) -> int:
         return 0 if seq is None else seq.n_blocks
 
-    def can_allocate(self,
+    def can_allocate(self, 
                      seq_group: SequenceGroup,
-                     num_lookahead_slots: int = 0) -> AllocStatus:
+                     num_lookahead_slots: int = 0,
+                     top_k_func: Optional[TopKCalculator] = None) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 

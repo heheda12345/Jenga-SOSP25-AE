@@ -12,11 +12,15 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.core.topk_utils import TopKCalculator
+import random 
+import time 
 
+random.seed(4)
 SeqId = int
 EncoderSeqId = str
 
-
+    
 class BlockSpaceManagerV2(BlockSpaceManager):
     """BlockSpaceManager which manages the allocation of KV cache.
 
@@ -104,22 +108,39 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             self.block_allocator)
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
-
-    def can_allocate(self,
+        
+        # NOTE: token-drop experiment 
+        self.top_k_func = TopKCalculator()
+    
+            
+    def can_allocate(self, 
                      seq_group: SequenceGroup,
                      num_lookahead_slots: int = 0) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-
+        st = time.time()
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
-
+            
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        seq.seq_id
+        
+        # NOTE: get top K for the sequence for prefill 
+        is_prompt = seq_group.is_prefill()
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=False)
+        largest_k = max(top_k_wo_none_list)
+
+        token_ids = seq.get_token_ids()
+        assert len(token_ids) >= largest_k, f"Token ids: {len(token_ids)}, largest K: {largest_k}"
+        
         num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
+            # seq.get_token_ids(), 
+            random.sample(token_ids, largest_k),  # token drop         
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
-
+        # print(f"Top k wo None list: {top_k_wo_none_list}, Largest top k: {largest_k}, num required blocks: {num_required_blocks}")
+        
+        # NOTE: skip the following code 
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
@@ -128,6 +149,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 block_size=self.block_size,
             )
 
+        # NOTE: skip the following code 
         if self.max_block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
                                       self.max_block_sliding_window)
@@ -135,6 +157,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
 
+        # print(f"Can allocate seq time: {time.time() - st}")
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
                 self.watermark_blocks):
@@ -144,21 +167,33 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def _allocate_sequence(self, seq: Sequence) -> BlockTable:
+    def _allocate_sequence(self, seq: Sequence, is_prompt: bool = True) -> BlockTable:
+        st = time.time()
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
+        
         if seq.get_token_ids():
+            token_ids = seq.get_token_ids()
+            
+            # NOTE: actually update the top K for this sequence 
+            top_k_list, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=True)
+            largest_k = max(top_k_wo_none_list)
+            
+            # NOTE: random sample K positions from token_ids 
+            new_token_ids = random.sample(token_ids, largest_k)
+        
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq.get_token_ids())
+            # block_table.allocate(seq.get_token_ids()) 
+            block_table.allocate(new_token_ids)
 
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-
         # Allocate self-attention block tables for decoder sequences
+        st = time.time()
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
@@ -166,7 +201,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
         seq = waiting_seqs[0]
-        block_table: BlockTable = self._allocate_sequence(seq)
+        block_table: BlockTable = self._allocate_sequence(seq, seq_group.is_prefill())
         self.block_tables[seq.seq_id] = block_table
 
         # Track seq
@@ -196,9 +231,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
-            block_table = self._allocate_sequence(encoder_seq)
+            block_table = self._allocate_sequence(encoder_seq, seq_group.is_prefill())
             self.cross_block_tables[request_id] = block_table
 
+        # print(f"Allocate sequence time: {time.time() - st}")
+        
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
         """Determine if there is enough space in the GPU KV cache to continue
@@ -212,37 +249,80 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         for known tokens. The contents of the lookahead slots are not defined.
         This is used by speculative decoding when speculating future tokens.
         """
-
+        st = time.time()
         num_touched_blocks = 0
+        is_prompt = seq_group.is_prefill()
+        
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
-
-            num_touched_blocks += (
+            
+            # NOTE: token drop 
+            _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=False)
+            largest_tokens_kept = max(top_k_wo_none_list)
+            past_largest_tokens_kept = self.top_k_func.get_past_step_largest_topk(seq.seq_id)
+            
+            if largest_tokens_kept <= past_largest_tokens_kept:
+                # If touched is smaller, then don't have any additional blocks
+                # Might need to free blocks later 
+                num_touched_blocks += 0
+            else:
+                # If not, calculate the blocks needed by appending tokens
+                num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
                     token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
+                        # seq.get_token_ids()
+                        random.sample(seq.get_token_ids(), largest_tokens_kept)
+                    ),
                     num_lookahead_slots=num_lookahead_slots,
                 ))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
+        
+        # print(f"Can append slots TOT: {time.time() - st}")
         return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slots(
         self,
         seq: Sequence,
         num_lookahead_slots: int,
+        is_prompt: bool = False, 
     ) -> List[Tuple[int, int]]:
-
+        st = time.time()
         block_table = self.block_tables[seq.seq_id]
-
+        
+        # TODO: do we actually need to change the token IDs here 
+        
+        # Token Drop 
+        # TODO: note, mast get prev largest K before updating the top K
+        prev_largest_k = self.top_k_func.get_past_step_largest_topk(seq.seq_id)
+        _, top_k_wo_none_list = self.top_k_func.get_top_k_for_seq(is_prompt, seq, update=True)
+        current_largest_k = max(top_k_wo_none_list)
+        tokens_to_append = current_largest_k - prev_largest_k
+                        
+        # NOTE: token-drop (change things inside the block table)
+        # NOTE: not sure whether this is the right way to do things...
+        token_ids = seq.get_token_ids()
+        sample_from_tokens_ids = random.sample(token_ids, current_largest_k)
+        sampled_unseen_tokens = block_table.get_unseen_token_ids(sample_from_tokens_ids) 
+        if len(sampled_unseen_tokens) == 0:
+            # NOTE: decode needs at least one unseen??? I don't know how it works
+            sampled_unseen_tokens = random.sample(sample_from_tokens_ids, 1)
+            
+        # print(f"Current largest K: {current_largest_k}, Previous largest K: {prev_largest_k}, Tokens to append: {tokens_to_append}, Unseen tokens: {len(sampled_unseen_tokens)}, sample from token ids length: {len(sample_from_tokens_ids)}")
+        
         block_table.append_token_ids(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            # token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            token_ids=sampled_unseen_tokens,
+            sample_token_ids=sample_from_tokens_ids,  # token drop (contain topk)
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
+            tokens_to_append=tokens_to_append, # free the page if necessary
         )
+        
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
+        # print(f"Append token ids: {time.time() - st}")
         return new_cows
 
     def free(self, seq: Sequence) -> None:

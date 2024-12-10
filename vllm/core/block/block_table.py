@@ -98,6 +98,7 @@ class BlockTable:
                                                      device=device)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
+        # print(f"Allocate, number of full slots set to {self._num_full_slots}")
 
     def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
@@ -107,8 +108,10 @@ class BlockTable:
 
     def append_token_ids(self,
                          token_ids: List[int],
+                         sample_token_ids: List[int],
                          num_lookahead_slots: int = 0,
-                         num_computed_slots: Optional[int] = None) -> None:
+                         tokens_to_append: Optional[int] = None, 
+                         num_computed_slots: Optional[int] = None,) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -130,11 +133,19 @@ class BlockTable:
                 Without sliding window, None can be passed.
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
+                
+            tokens_to_append (Optional[int]): The number of tokens to append.
+                - If positive, it is the number of tokens to append.
+                - If negative, might need to free 
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
-
+        # print(f"Before pass in, num full slots is {self._num_full_slots}, num empty slots is {self._num_empty_slots}")
         # Drop blocks that are no longer needed due to sliding window
+        # TODO: max blocking window (Take a look)
+        # TODO: now free a block, if the last block is not used, free
+        # TODO: pop if don't need (this is per sequence)
+        
         if self._max_block_sliding_window is not None:
             null_block = self._allocator.allocate_or_get_null_block()
             assert num_computed_slots is not None
@@ -146,19 +157,94 @@ class BlockTable:
                     self._allocator.free(b)
                     self._blocks[idx] = null_block
 
+        # TODO (shu): token-drop logic to add 
+        
+        if tokens_to_append is not None and tokens_to_append < 0: # if negative, then might need to free 
+            null_block = self._allocator.allocate_or_get_null_block()
+            end_block_idx = len(self._blocks) # free the last num_blocks_to_free blocks
+            
+            # blocks_needed is rounded up of len(token_ids) / block_size
+            # print(f"Length of token_ids: {len(sample_token_ids)}, self block size: {self._block_size}")
+            blocks_needed = math.ceil(len(sample_token_ids) / self._block_size)
+            num_blocks_tot = end_block_idx
+            num_blocks_to_free = num_blocks_tot - blocks_needed
+            # print(f"Num blocks needed: {blocks_needed}, Num blocks total: {num_blocks_tot}, Num blocks to free: {num_blocks_to_free}")
+            tokens_to_append_reverse = -tokens_to_append
+            # number of blocks to free 
+            # num_blocks_to_free = tokens_to_append // self._block_size
+            # print(f"Calculated num blocks to free: {num_blocks_to_free}, num full slots now: {self._num_full_slots}") 
+            
+            # NOTE: is this even correct? update num full slots to reflect the new number of tokens
+            # self._num_full_slots -= num_blocks_to_free * self._block_size
+            
+            # ending block index 
+            free_cnt = 0
+            keep_track_idxes = []
+            for idx in range(end_block_idx-num_blocks_to_free, end_block_idx):
+                #  NOTE(shu): no check, directly free 
+                b = self._blocks[idx]
+                if b is not null_block:
+                    self._allocator.free(b)
+                    self._blocks[idx] = null_block
+                    keep_track_idxes.append(idx)
+                    free_cnt += 1
+                else:
+                    # b is null block???
+                    print(f"{b.block_id} is null block, cannot free")
+
+            # NOTE: not sure if this works, but update blocks like this 
+            # Pop indexes from self._blocks 
+            self._blocks.free_blocks(keep_track_idxes)  
+            
+            # NOTE: also, for the last block, trim the token ids to residual length
+            # NOTE: hard code 
+            residual_length = len(sample_token_ids) % self._block_size
+            # self._blocks[-1].token_ids = self._blocks[-1].token_ids[:residual_length]
+            self._blocks.trim_block_token_ids(-1, residual_length-1) # keep 1 slot for the last slot mapping to add??
+            
+            # print(f"Before update, length of blocks and block ids: {len(self._blocks._blocks)}, {len(self._blocks._block_ids)}")
+            # self._blocks._blocks = [b for i, b in enumerate(self._blocks._blocks) if i not in keep_track_idxes]
+            # self._blocks._block_ids = [b for i, b in enumerate(self._blocks._block_ids) if i not in keep_track_idxes]
+            # print(f"After update, length of blocks and block ids: {len(self._blocks._blocks)}, {len(self._blocks._block_ids)}")
+            assert free_cnt == num_blocks_to_free, f"Free count {free_cnt} != {num_blocks_to_free}"
+            # print(f"Block Table: Tokens to Append is {tokens_to_append_reverse}, Free {num_blocks_to_free} blocks")
+            
+            self._num_full_slots = len(sample_token_ids)
+        
+        if tokens_to_append is not None and tokens_to_append == 0:
+            residual_length = len(sample_token_ids) % self._block_size
+            # self._blocks[-1].token_ids = self._blocks[-1].token_ids[:residual_length]
+            self._blocks.trim_block_token_ids(-1, residual_length-1) # keep 1 slot for the last slot mapping to add??
+            self._num_full_slots = len(sample_token_ids)
+            
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
+        
+        # NOTE: token ids is unseen tokens      
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)
 
         # Update the blocks with the new tokens
-        first_block_idx = self._num_full_slots // self._block_size
-        token_blocks = self._chunk_token_blocks_for_append(token_ids)
+        # NOTE: set this to 0 now... not sure if it works        
+        if tokens_to_append is not None and tokens_to_append <= 0:
+            # if just free blocks... don't need to append tokens at all, just set full slots to len(sample_token_ids)    
+            # print(f"(JUST AFTER TOKENS TO APPEND) Length of block table now: {len(self._blocks)}")
+            # print(f"Now num full slots is {self._num_full_slots}, num empty slots is {self._num_empty_slots}, append unseen tokens: {len(token_ids)}")
+            self._blocks.append_token_ids(-1, token_ids)
+        else:    
+            first_block_idx = self._num_full_slots // self._block_size
+            # print(f"Number of full slots: {self._num_full_slots}, First block idx is: {first_block_idx}")
 
-        for i, token_block in enumerate(token_blocks):
-            self._blocks.append_token_ids(first_block_idx + i, token_block)
-
-        self._num_full_slots += len(token_ids)
+            token_blocks = self._chunk_token_blocks_for_append(token_ids)
+            # print(f"Before append, number of full slots: {self._num_full_slots}, number of empty slots: {self._num_empty_slots}, tokens id length: {len(token_ids)}, token blocks: {len(token_blocks)}")
+            # print(f"Token blocks blocks id: {token_blocks}")
+            # print(f"Total length of token blocks: {sum([len(token_block) for token_block in token_blocks])}")
+            for i, token_block in enumerate(token_blocks):
+                # print(f"Block index to append: {first_block_idx + i}")
+                # print(f"Block index to append: {first_block_idx + i}, token block length: {len(token_block)}")
+                self._blocks.append_token_ids(first_block_idx + i, token_block)
+   
+            self._num_full_slots += len(token_ids)
 
     def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
         """Ensures that the BlockTable has at least the specified number of
@@ -176,6 +262,7 @@ class BlockTable:
         # appending tokens to GPU blocks.
         device = Device.GPU
         assert self._is_allocated
+        # print(f"Ensure number of empty slots: {num_empty_slots}, number of empty slots now: {self._num_empty_slots}")
 
         if self._num_empty_slots >= num_empty_slots:
             return
@@ -321,6 +408,7 @@ class BlockTable:
     @property
     def _num_empty_slots(self) -> int:
         assert self._is_allocated
+        # print(f"(Num Empty Slots) Length of self blocks now: {len(self._blocks)}")
         return len(self._blocks) * self._block_size - self._num_full_slots
 
     @property

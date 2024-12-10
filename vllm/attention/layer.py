@@ -97,6 +97,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        layer_id: int, 
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
 
@@ -107,7 +108,8 @@ class Attention(nn.Module):
                                  attn_metadata,
                                  self._k_scale,
                                  self._v_scale,
-                                 attn_type=attn_type)
+                                 attn_type=attn_type,
+                                 layer_id=layer_id)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore

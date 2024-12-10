@@ -103,7 +103,9 @@ class AttentionMetadata:
     # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
+    # slot_mapping: torch.Tensor
+    # NOTE: chagne this for token drop model 
+    slot_mapping: List[torch.Tensor]
 
     @property
     @abstractmethod

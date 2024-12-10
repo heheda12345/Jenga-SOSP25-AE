@@ -226,6 +226,11 @@ class Worker(LocalOrDistributedWorkerBase):
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        
+        # NOTE(shu): skip the profiling step
+        # free_gpu_memory = 40 * 1024 * 1024 * 1024
+        # total_gpu_memory = 80 * 1024 * 1024 * 1024
+        
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory

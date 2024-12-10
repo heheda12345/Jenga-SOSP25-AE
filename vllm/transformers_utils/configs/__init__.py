@@ -19,6 +19,7 @@ from vllm.transformers_utils.configs.qwen2vl import (Qwen2VLConfig,
                                                      Qwen2VLVisionConfig)
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.transformers_utils.configs.random_drop import RandomDropConfig
 
 __all__ = [
     "ChatGLMConfig",
@@ -39,4 +40,5 @@ __all__ = [
     "UltravoxConfig",
     "Qwen2VLConfig",
     "Qwen2VLVisionConfig",
+    "RandomDropConfig",
 ]

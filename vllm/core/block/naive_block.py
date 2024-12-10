@@ -391,7 +391,7 @@ class NaiveBlock(Block):
         if len(token_ids) == 0:
             return
 
-        assert len(token_ids) <= self.num_empty_slots
+        assert len(token_ids) <= self.num_empty_slots, f"len(token_ids): {len(token_ids)}, num_empty_slots: {self.num_empty_slots}"
 
         self._token_ids.extend(token_ids)
 

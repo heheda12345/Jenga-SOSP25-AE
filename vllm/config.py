@@ -169,6 +169,16 @@ class ModelConfig:
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
 
+        # NOTE: hack for random drop
+        # Read `prefill_stage` and `generation_stage` into separate configurations
+        # Hack num_layers = num_hidden_layers
+        self.seq_len_to_keep = getattr(self.hf_text_config,
+                                        "seq_len_to_keep", None) 
+        self.prefill_config = getattr(self.hf_text_config, "prefill_stage", {})
+        self.gen_config = getattr(self.hf_text_config, "generation_stage", {})
+        self.num_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+
+        print(f"Model config (seq_len_to_keep): {self.seq_len_to_keep}")
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
             self.enforce_eager = False
@@ -607,6 +617,7 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+        
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -922,6 +933,7 @@ class SchedulerConfig:
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         use_v2_block_manager: Whether to use the BlockSpaceManagerV2 or not.
+        use_v3_block_manager: Whether to use the BlockSpaceManagerV3 or not.
         num_lookahead_slots: The number of slots to allocate per sequence per
             step, beyond the known token ids. This is used in speculative
             decoding to store KV activations of tokens which may or may not be
@@ -949,6 +961,7 @@ class SchedulerConfig:
                  max_num_seqs: int,
                  max_model_len: int,
                  use_v2_block_manager: bool = True,
+                 use_v3_block_manager: bool = False, 
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -999,6 +1012,10 @@ class SchedulerConfig:
         self.max_num_seqs = max_num_seqs
         self.max_model_len = max_model_len
         self.use_v2_block_manager = use_v2_block_manager
+        self.use_v3_block_manager = use_v3_block_manager
+        
+        assert not (self.use_v2_block_manager and self.use_v3_block_manager), \
+            "v2 and v3 block manager are not enabled at the same time"
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
@@ -1039,7 +1056,8 @@ class SchedulerConfig:
                 f"({self.num_scheduler_steps}) must be greater than or "
                 "equal to 1.")
 
-        if (not self.use_v2_block_manager \
+        # NOTE: token-drop 
+        if (not self.use_v2_block_manager and not self.use_v3_block_manager \
             and not envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1):
             raise ValueError(
                 "The use of BlockSpaceManagerV1 is deprecated and will "
