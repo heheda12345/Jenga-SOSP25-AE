@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 
@@ -21,7 +21,7 @@ from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings_from_map)
 
 logger = init_logger(__name__)
 
@@ -108,9 +108,13 @@ def input_processor_for_paligemma(ctx: InputContext,
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+    return token_inputs(
+        prompt_token_ids=new_token_ids,
+        prompt=new_prompt,
+        multi_modal_data=multi_modal_data,
+        multi_modal_placeholders={
+            "image": [PlaceholderRange(offset=0, length=image_feature_size)]
+        })
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
@@ -149,11 +153,12 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
-        config.text_config.architectures = ["GemmaForCausalLM"]
+        config.text_config.architectures = ["Gemma2ForCausalLM"]
         self.language_model = init_vllm_registered_model(
-            config.text_config,
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"))
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
 
@@ -254,12 +259,17 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_index)
+
+            # TODO(ywang96): use merge_multimodal_embeddings after
+            # v0 is deprecated
+            merge_multimodal_embeddings_from_map(
+                inputs_embeds, multimodal_embeddings,
+                attn_metadata.multi_modal_placeholder_index_maps["image"])
+
         return inputs_embeds
 
     def forward(self,
@@ -278,7 +288,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+                                                      vision_embeddings,
+                                                      attn_metadata)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,

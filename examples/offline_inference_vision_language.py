@@ -119,8 +119,8 @@ def run_paligemma(question: str, modality: str):
     assert modality == "image"
 
     # PaliGemma has special prompt format for VQA
-    prompt = "caption en"
-    llm = LLM(model="google/paligemma-3b-mix-224")
+    prompt = ""
+    llm = LLM(model="google/paligemma2-3b-pt-896", enable_chunked_prefill=True, max_num_batched_tokens=256)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 

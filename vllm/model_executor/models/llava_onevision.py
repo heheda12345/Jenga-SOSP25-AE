@@ -839,7 +839,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # TODO(ywang96): Add support for mixed-modality inference for v1.
         multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
 
-        print("encoder caller")
         if "images" in modalities:
             image_input = modalities["images"]
             vision_embeddings = self._process_image_input(image_input)
