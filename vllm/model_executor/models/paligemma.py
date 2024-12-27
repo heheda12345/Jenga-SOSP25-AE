@@ -6,14 +6,19 @@ from torch import nn
 from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.attention.backends.utils import MMEmbeddingMetadata
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.core.block_v3.custom_block import SelfAttentionManager, SlidingWindowManager, VisionEmbeddingManager
+from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.models.gemma import GemmaForCausalLM
+# from vllm.model_executor.models.gemma import GemmaForCausalLM
+from vllm.model_executor.models.gemma2 import Gemma2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 
@@ -23,6 +28,29 @@ from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
 from .utils import AutoWeightsLoader, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
+
+
+def custom_block_manager_for_paligemma(model_config: ModelConfig,
+                                       cache_config: CacheConfig,
+                                       parallel_config: ParallelConfig):
+    custom_managers = {}
+    sliding_window = model_config.hf_config.get_text_config().sliding_window
+    print("model config sliding window", sliding_window)
+    share_layer_ids = set()
+    for i in range(model_config.get_num_layers(parallel_config)):
+        if i % 2 == 0 and sliding_window is not None:
+            custom_managers[str(i)] = SlidingWindowManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size, sliding_window)
+        else:
+            custom_managers[str(i)] = SelfAttentionManager(
+                model_config, parallel_config, cache_config.cache_dtype,
+                cache_config.block_size)
+            share_layer_ids.add(str(i))
+    custom_managers["vision"] = VisionEmbeddingManager(
+        model_config, parallel_config, cache_config.cache_dtype,
+        cache_config.block_size, share_layer_ids)
+    return custom_managers
 
 
 class PaliGemmaImagePixelInputs(TypedDict):
@@ -65,6 +93,7 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     )
 
     mm_data = dummy_image_for_siglip(vision_config, num_images)
+    mm_data['text'] = seq_data.prompt_token_ids
     return seq_data, mm_data
 
 
@@ -104,6 +133,7 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
 
     new_prompt = f"{image_token_str_pad}{bos_token}{orig_prompt}\n"
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
+    multi_modal_data['text'] = new_token_ids
 
     # NOTE: Create a defensive copy of the original inputs
     return LLMInputs(prompt_token_ids=new_token_ids,
@@ -127,6 +157,8 @@ class PaliGemmaMultiModalProjector(nn.Module):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
+@BLOCK_MANAGER_REGISTRY.register_block_manager(
+    custom_block_manager_for_paligemma)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
@@ -146,8 +178,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
-        self.language_model = GemmaForCausalLM(config.text_config,
-                                               cache_config, quant_config)
+        self.language_model = Gemma2ForCausalLM(config.text_config,
+                                                cache_config, quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
 
@@ -246,22 +278,50 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             input_ids = None
             inputs_embeds = None
         else:
-            parsed_image_input = self._parse_and_validate_image_input(**kwargs)
-
-            if parsed_image_input is not None:
-                vision_embeddings = self._process_image_input(
-                    parsed_image_input)
+            vision_metadata = attn_metadata['vision']
+            assert isinstance(vision_metadata, MMEmbeddingMetadata)
+            if vision_metadata.num_mm_prefills > 0:
+                # run vision encoder
+                vision_kwargs = MultiModalInputs.as_kwargs(
+                    vision_metadata.multi_modal_inputs,
+                    device=input_ids.device)
+                image_input = self._parse_and_validate_image_input(
+                    **vision_kwargs)
+                mm_input_ids = vision_metadata.mm_token_ids
+                assert image_input is not None
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    mm_input_ids)
+                vision_embeddings = self._process_image_input(image_input)
                 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
                 vision_embeddings = vision_embeddings * (
                     self.config.hidden_size**-0.5)
-
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
-
                 inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
+                    mm_input_ids, inputs_embeds, vision_embeddings,
                     self.config.image_token_index)
-
+                if kv_caches['vision'].numel() > 0:
+                    kv_caches['vision'][
+                        vision_metadata.mm_slot_mapping, :inputs_embeds.
+                        shape[-1]] = inputs_embeds
+            if vision_metadata.num_prefills > 0:
+                # fetch prefill embeddings from kv_caches and run decode embeddings
+                num_prefill_tokens = vision_metadata.num_prefill_tokens
+                prefill_slots = vision_metadata.slot_mapping[:
+                                                             num_prefill_tokens]
+                hidden_size = self.config.text_config.hidden_size
+                if kv_caches['vision'].numel() == 0:
+                    # dummy embedding for profile run
+                    prefill_embeds = torch.ones(
+                        (num_prefill_tokens, hidden_size),
+                        dtype=kv_caches['vision'].dtype,
+                        device=input_ids.device)
+                else:
+                    # fetch prefill embeddings from kv_caches
+                    prefill_embeds = kv_caches['vision'][
+                        prefill_slots, :hidden_size]
+                decode_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids[num_prefill_tokens:])
+                inputs_embeds = torch.cat((prefill_embeds, decode_embeds),
+                                          dim=0)
                 input_ids = None
             else:
                 inputs_embeds = None
