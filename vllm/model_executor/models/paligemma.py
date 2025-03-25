@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.gemma import GemmaForCausalLM
+from vllm.model_executor.models.gemma2 import Gemma2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -146,7 +147,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
-        self.language_model = GemmaForCausalLM(config.text_config,
+        self.language_model = Gemma2ForCausalLM(config.text_config,
                                                cache_config, quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale

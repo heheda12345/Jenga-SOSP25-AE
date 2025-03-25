@@ -356,6 +356,10 @@ class Gemma2Model(nn.Module):
             logger.warning(
                 "Some weights are not initialized from checkpoints: %s",
                 unloaded_params)
+            logger.warning("loaded weights %s", loaded_params)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
 
 class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -459,3 +463,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         loader.load_weights(weights)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)

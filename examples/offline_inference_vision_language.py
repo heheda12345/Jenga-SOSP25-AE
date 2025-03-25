@@ -118,7 +118,7 @@ def run_paligemma(question: str, modality: str):
 
     # PaliGemma has special prompt format for VQA
     prompt = "caption en"
-    llm = LLM(model="google/paligemma-3b-mix-224")
+    llm = LLM(model="google/paligemma2-10b-pt-896")
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
