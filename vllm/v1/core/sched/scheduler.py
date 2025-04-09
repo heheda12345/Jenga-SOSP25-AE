@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
@@ -508,8 +509,8 @@ class Scheduler(SchedulerInterface):
         assert mm_positions is not None
         assert len(mm_positions) > 0
         for i, pos_info in enumerate(mm_positions):
-            start_pos = pos_info["offset"]
-            num_encoder_tokens = pos_info["length"]
+            start_pos = pos_info.offset
+            num_encoder_tokens = pos_info.length
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -525,6 +526,17 @@ class Scheduler(SchedulerInterface):
             if self.encoder_cache_manager.has_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
+
+            # If no encoder input chunking is allowed, we do not want to
+            # partially schedule a multimodal item. If the scheduled range would
+            # only cover part of the mm input, roll back to before the mm item.
+            if (self.scheduler_config.disable_chunked_mm_input
+                    and num_computed_tokens < start_pos
+                    and (num_computed_tokens + num_new_tokens)
+                    < (start_pos + num_encoder_tokens)):
+                num_new_tokens = start_pos - num_computed_tokens
+                break
+
             if (not self.encoder_cache_manager.can_allocate(request, i)
                     or num_encoder_tokens > encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
@@ -560,6 +572,7 @@ class Scheduler(SchedulerInterface):
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
+        spec_decoding_stats: Optional[SpecDecodingStats] = None
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -587,6 +600,10 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
+                spec_decoding_stats = self.make_spec_decoding_stats(
+                    spec_decoding_stats,
+                    num_draft_tokens=len(scheduled_spec_token_ids),
+                    num_accepted_tokens=len(generated_token_ids) - 1)
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -594,8 +611,8 @@ class Scheduler(SchedulerInterface):
             if cached_encoder_input_ids:
                 for input_id in list(cached_encoder_input_ids):
                     mm_positions = request.mm_positions[input_id]
-                    start_pos = mm_positions["offset"]
-                    num_tokens = mm_positions["length"]
+                    start_pos = mm_positions.offset
+                    num_tokens = mm_positions.length
                     if start_pos + num_tokens <= request.num_computed_tokens:
                         # The encoder output is already processed and stored
                         # in the decoder's KV cache.
@@ -661,7 +678,7 @@ class Scheduler(SchedulerInterface):
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
-            scheduler_stats=self.make_stats(),
+            scheduler_stats=self.make_stats(spec_decoding_stats),
         )
         if self.include_finished_set:
             #TODO currently sending duplicates here, improve this
@@ -728,7 +745,10 @@ class Scheduler(SchedulerInterface):
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
 
-    def make_stats(self) -> Optional[SchedulerStats]:
+    def make_stats(
+        self,
+        spec_decoding_stats: Optional[SpecDecodingStats] = None,
+    ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
         return SchedulerStats(
@@ -736,4 +756,19 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=self.kv_cache_manager.make_prefix_cache_stats(),
+            spec_decoding_stats=spec_decoding_stats,
         )
+
+    def make_spec_decoding_stats(
+        self,
+        spec_decoding_stats: Optional[SpecDecodingStats],
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+    ) -> Optional[SpecDecodingStats]:
+        if not self.log_stats:
+            return None
+        if spec_decoding_stats is None:
+            spec_decoding_stats = SpecDecodingStats()
+        spec_decoding_stats.observe(num_draft_tokens=num_draft_tokens,
+                                    num_accepted_tokens=num_accepted_tokens)
+        return spec_decoding_stats
