@@ -308,7 +308,7 @@ class FlashAttentionMetadataBuilder:
                     self.runner.attention_chunk_size,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
-                    block_table,
+                    block_table_tensor,
                     self.kv_cache_spec.block_size,
                 )
             local_attn_metadata = FlashAttentionMetadata.LocalAttentionMetadata(
