@@ -425,6 +425,8 @@ def init_kv_cache_manager(
 ) -> Union[KVCacheManager, "HybridKVCacheManager"]:
     from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
     if len(kv_cache_config.kv_cache_groups) > 1:
+        logger.info("Initializing HybridKVCacheManager with KVCacheConfig: %s",
+                    kv_cache_config)
         return HybridKVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
@@ -434,6 +436,8 @@ def init_kv_cache_manager(
             log_stats=log_stats,
         )
     else:
+        logger.info("Initializing KVCacheManager with KVCacheConfig: %s",
+                    kv_cache_config)
         return KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,

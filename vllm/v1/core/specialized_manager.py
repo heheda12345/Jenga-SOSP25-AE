@@ -6,7 +6,7 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        LocalChunkSpec, SlidingWindowSpec)
 from vllm.v1.utils import ConstantList
 
 
@@ -212,9 +212,78 @@ class SlidingWindowManager(SpecializedManager):
         return removed_blocks
 
 
+class LocalChunkManager(SpecializedManager):
+
+    def __init__(self, kv_cache_spec: LocalChunkSpec, block_pool: BlockPool):
+        super().__init__(kv_cache_spec, block_pool)
+        self.local_chunk = kv_cache_spec.local_chunk
+        assert self.local_chunk % self.block_size == 0
+        self.local_chunk_num_blocks = self.local_chunk // self.block_size
+        self._null_block = block_pool.null_block
+
+    def _find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType],
+            computed_blocks: Optional[list[KVCacheBlock]]
+    ) -> list[KVCacheBlock]:
+        cur_chunk_idx = max(
+            cdiv(len(block_hashes), self.local_chunk_num_blocks) - 1, 0)
+        if computed_blocks is None:
+            computed_blocks = [self._null_block] * cur_chunk_idx
+        else:
+            prev_chunk_idx = max(
+                cdiv(len(computed_blocks), self.local_chunk_num_blocks) - 1, 0)
+            if prev_chunk_idx == cur_chunk_idx:
+                del computed_blocks[len(block_hashes):]
+                return computed_blocks
+            else:
+                del computed_blocks[cur_chunk_idx *
+                                    self.local_chunk_num_blocks:]
+        while cur_chunk_idx >= 0:
+            has_cached_block = False
+            for i in range(
+                    cur_chunk_idx * self.local_chunk_num_blocks,
+                    min(len(block_hashes),
+                        (cur_chunk_idx + 1) * self.local_chunk_num_blocks)):
+                if cached_block := self.block_pool.get_cached_block(
+                        block_hashes[i]):
+                    computed_blocks.append(cached_block)
+                    has_cached_block = True
+                else:
+                    break
+            if has_cached_block:
+                break
+            cur_chunk_idx -= 1
+            del computed_blocks[cur_chunk_idx * self.local_chunk_num_blocks:]
+        # print("computed_blocks", len(computed_blocks),
+        #       [b.block_id for b in computed_blocks])
+        return computed_blocks
+
+    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
+        # Remove the blocks that are no longer be in the local chunk and
+        # skipped during the attention computation.
+        num_skipped_chunks = num_computed_tokens // self.local_chunk
+        num_skipped_blocks = num_skipped_chunks * self.local_chunk_num_blocks
+        # need to reserve the last computed block as BlockPool.cache_full_blocks
+        # uses it
+        num_skipped_blocks = min(
+            num_skipped_blocks,
+            cdiv(num_computed_tokens, self.block_size) - 1)
+        removed_blocks: list[KVCacheBlock] = []
+        # print("before remove", len(blocks), [b.block_id for b in blocks])
+        for i in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                break
+            removed_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        # print("after remove", len(blocks), [b.block_id for b in blocks])
+        return removed_blocks
+
+
 spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
+    LocalChunkSpec: LocalChunkManager,
 }
 
 

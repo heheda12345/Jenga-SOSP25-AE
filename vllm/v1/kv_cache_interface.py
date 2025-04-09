@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -77,7 +77,8 @@ class AttentionSpec(KVCacheSpec):
 @dataclass
 class FullAttentionSpec(AttentionSpec):
     # TODO: add note
-    compute_as_sliding_window: bool = False
+    sliding_window: Optional[int] = None
+    local_chunk: Optional[int] = None
 
     @property
     def type_id(self) -> str:
@@ -116,6 +117,25 @@ class SlidingWindowSpec(AttentionSpec):
         # is 4, we need two blocks [XXCD] [EF] to store the sliding
         # window [CDEF] of 6 tokens.
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+
+
+@dataclass
+class LocalChunkSpec(AttentionSpec):
+    local_chunk: int
+
+    @property
+    def type_id(self) -> str:
+        return f"local_attention_{self.local_chunk}_{self.block_size}_{self.page_size_bytes}"  # noqa
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # TODO: need to verify the math below
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        num_tokens = min(
+            self.local_chunk + cdiv(max_num_batched_tokens, self.local_chunk),
+            max_model_len)
+        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
 @dataclass

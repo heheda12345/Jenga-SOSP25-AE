@@ -14,7 +14,7 @@ from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, LocalChunkSpec
 from vllm.v1.worker.block_table import BlockTable
 from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
@@ -283,6 +283,11 @@ class FlashAttentionMetadataBuilder:
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.persistent_block_table = persistent_block_table
+        if isinstance(kv_cache_spec, LocalChunkSpec) or isinstance(
+                kv_cache_spec, FullAttentionSpec):
+            self.local_chunk = kv_cache_spec.local_chunk
+        else:
+            self.local_chunk = None
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -302,10 +307,10 @@ class FlashAttentionMetadataBuilder:
 
         # for local attention
         local_attn_metadata = None
-        if self.runner.attention_chunk_size is not None:
+        if self.local_chunk is not None:
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table = make_local_attention_virtual_batches(
-                    self.runner.attention_chunk_size,
+                    self.local_chunk,
                     self.runner.query_start_loc_np[:num_reqs + 1],
                     self.runner.seq_lens_np[:num_reqs],
                     block_table_tensor,

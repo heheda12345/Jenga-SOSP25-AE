@@ -116,7 +116,7 @@ class BlockPool:
             prev_block_hash_value = None
         else:
             prev_block = blocks[num_cached_blocks - 1]
-            assert prev_block.block_hash is not None
+            assert prev_block.block_hash is not None, f"prev_block.block_hash is None for request {request.request_id} prev_block: {prev_block.block_id}, num_cached_blocks: {num_cached_blocks} num_full_blocks: {num_full_blocks}"
             prev_block_hash_value = prev_block.block_hash.hash_value
 
         for i, blk in enumerate(new_full_blocks):

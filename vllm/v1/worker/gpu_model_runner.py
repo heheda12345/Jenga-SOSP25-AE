@@ -34,7 +34,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheNewTensor,
                                         KVCacheReuseTensor, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        LocalChunkSpec, SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -103,7 +103,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Model-related.
         self.hidden_size = model_config.get_hidden_size()
-        self.attention_chunk_size = model_config.attention_chunk_size
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
@@ -698,9 +697,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // kv_cache_spec.block_size *
                              kv_cache_spec.block_size)
-        use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec)
-                              or (isinstance(kv_cache_spec, FullAttentionSpec)
-                                  and kv_cache_spec.compute_as_sliding_window))
+        use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec) or
+                              (isinstance(kv_cache_spec, FullAttentionSpec)
+                               and kv_cache_spec.sliding_window is not None))
         assert isinstance(kv_cache_spec, AttentionSpec)
         use_cascade = attn_backend.use_cascade_attention(
             common_prefix_len=common_prefix_len,
@@ -1689,8 +1688,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
                               kv_cache_spec.page_size_bytes)
-                if isinstance(kv_cache_spec,
-                              (FullAttentionSpec, SlidingWindowSpec)):
+                if isinstance(kv_cache_spec, AttentionSpec):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
@@ -1807,6 +1805,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         num_kv_heads=attn_module.num_kv_heads,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla)
+                elif getattr(attn_module.impl, 'use_irope', False):
+                    kv_cache_spec[layer_name] = LocalChunkSpec(
+                        block_size=block_size,
+                        head_size=attn_module.head_size,
+                        num_query_heads=attn_module.num_heads,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        dtype=self.kv_cache_dtype,
+                        local_chunk=self.model_config.attention_chunk_size,
                         use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
