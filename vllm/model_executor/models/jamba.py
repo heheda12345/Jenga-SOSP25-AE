@@ -50,7 +50,7 @@ def custom_block_manager_for_jamba(model_config: ModelConfig,
                                    parallel_config: ParallelConfig):
 
     def _get_mamba_cache_shape(hf_config: JambaConfig) -> List[List[int]]:
-        world_size = 1  # TODO: support TP here
+        world_size = parallel_config.world_size
         hidden_size = hf_config.hidden_size
         conv_state_shape = (
             hf_config.mamba_expand * hidden_size // world_size,

@@ -9,6 +9,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
 import torch
 from torch import is_tensor
 
+from vllm.attention.backends.utils import LAMetadata
+from vllm.config import KVCacheConfig
+from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
@@ -26,32 +29,61 @@ T = TypeVar('T', bound="BroadcastableModelInput")
 
 def _add_attn_metadata_broadcastable_dict(
         tensor_dict: Dict[str, Any],
-        attn_metadata: Optional["AttentionMetadata"]) -> None:
+        attn_metadata: Optional[Dict[str, "AttentionMetadata"]],
+        kv_cache_config: KVCacheConfig) -> None:
     """
     Helper method to update tensor_dict with broadcastable
     AttentionMetadata fields.
     """
     if attn_metadata is not None:
-        tensor_dict.update(attn_metadata.asdict_zerocopy())
+        for group_id, layer_ids in kv_cache_config.block_table_sharing.items():
+            group_attn_metadata = attn_metadata[layer_ids[0]]
+            metadata_dict = group_attn_metadata.asdict_zerocopy()
+            tensor_dict.update({
+                f'attnmetadata!{group_id}!{k}': v
+                for k, v in metadata_dict.items()
+            })
 
 
 def _init_attn_metadata_from_tensor_dict(
-    attn_backend: "AttentionBackend",
-    tensor_dict: Dict[str, Any],
-) -> Dict[str, Any]:
+    attn_backend: "AttentionBackend", tensor_dict: Dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    app_attn_metadata_builders: Dict[str,
+                                     "AppAwareManager"]) -> Dict[str, Any]:
     """
     Helper method to initialize AttentionMetadata based on an
     AttentionBackend and broadcastable AttentionMetadata fields.
     """
     # Extract the fields used to create AttentionMetadata.
-    valid_attn_kwargs = {}
-    for field in dataclasses.fields(attn_backend.get_metadata_cls()):
-        val = tensor_dict.pop(field.name, None)
-        if val is not None:
-            valid_attn_kwargs[field.name] = val
-
-    attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
-    tensor_dict["attn_metadata"] = attn_metadata
+    group_metadata = {
+        group_id: {}
+        for group_id in app_attn_metadata_builders.keys()
+    }  # dict[group_id, Any]
+    attn_metadata_all = {}
+    to_pop_keys = []
+    for k, v in tensor_dict.items():
+        if k.startswith("attnmetadata!"):
+            group_id = k.split("!")[1]
+            group_metadata[group_id][k.split("!")[2]] = v
+            to_pop_keys.append(k)
+    # pop the keys from tensor_dict
+    for k in to_pop_keys:
+        tensor_dict.pop(k)
+    for group_id, layer_ids in kv_cache_config.block_table_sharing.items():
+        recv_metadata = group_metadata[group_id]
+        if isinstance(app_attn_metadata_builders[group_id],
+                      LinearAttentionManager):
+            attn_metadata = LAMetadata.from_dict(recv_metadata)
+        else:
+            valid_attn_kwargs = {}
+            for field in dataclasses.fields(attn_backend.get_metadata_cls()):
+                val = recv_metadata.pop(field.name, None)
+                if val is not None:
+                    valid_attn_kwargs[field.name] = val
+            attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
+        for layer_id in layer_ids:
+            attn_metadata_all[layer_id] = attn_metadata
+    tensor_dict["attn_metadata"] = attn_metadata_all
     return tensor_dict
 
 

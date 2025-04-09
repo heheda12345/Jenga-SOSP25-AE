@@ -27,7 +27,7 @@ from vllm.config import (CacheConfig, DeviceConfig, KVCacheConfig, LoadConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.core.block_v3.registry import BlockManagerRegistry, BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder, LinearAttentionManager, VisionEmbeddingManager
+from vllm.core.block_v3.custom_block import AppAwareAttnMetadataBuilder, AppAwareManager, LinearAttentionManager, VisionEmbeddingManager
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
@@ -111,7 +111,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(
+            self, kv_cache_config: KVCacheConfig) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -124,7 +125,9 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
         }
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata,
+                                              kv_cache_config,
+                                              app_attn_metadata_builders)
         return tensor_dict
 
     @classmethod
@@ -149,7 +152,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # used by the driver worker.
     is_prompt: Optional[bool] = None
 
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+    def as_broadcastable_tensor_dict(
+            self, kv_cache_config: KVCacheConfig) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
@@ -162,7 +166,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
         }
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata,
+                                              kv_cache_config)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
                                                   self.sampling_metadata)
         return tensor_dict
@@ -171,12 +176,15 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     def from_broadcasted_tensor_dict(
         cls,
         tensor_dict: Dict[str, Any],
+        kv_cache_config: KVCacheConfig,
+        app_attn_metadata_builders: Dict[int, "AppAwareManager"],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "ModelInputForGPUWithSamplingMetadata":
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
-                attn_backend, tensor_dict)
+                attn_backend, tensor_dict, kv_cache_config,
+                app_attn_metadata_builders)
         return cls(**tensor_dict)
 
 
@@ -1373,24 +1381,25 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 kv_cache_config = self.kv_cache_config
                 assert kv_cache_config is not None
                 kv_caches = {
-                    layer_id: torch.tensor([],
-                                           dtype=kv_cache_config.buffer_dtype,
-                                           device=self.device)
+                    layer_id:
+                    torch.tensor([],
+                                 dtype=kv_cache_config.buffer_dtype,
+                                 device=self.device)
                     for layer_ids in
                     kv_cache_config.block_table_sharing.values()
                     for layer_id in layer_ids
                 }
                 kv_caches |= {
-                    layer_id: torch.tensor([],
-                                           dtype=kv_cache_config.buffer_dtype,
-                                           device=self.device)
+                    layer_id:
+                    torch.tensor([],
+                                 dtype=kv_cache_config.buffer_dtype,
+                                 device=self.device)
                     for layer_id in kv_cache_config.kv_cache_sharing.keys()
                 }
             else:
                 kv_caches = {
-                    str(layer_id): torch.tensor([],
-                                                dtype=torch.float32,
-                                                device=self.device)
+                    str(layer_id):
+                    torch.tensor([], dtype=torch.float32, device=self.device)
                     for layer_id in range(num_layers)
                 }
         else:
@@ -1564,7 +1573,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     kv_cache = kv_caches[virtual_engine]
                     if self.scheduler_config.use_per_layer_block_manager:
                         attn_metadata = {
-                            group_id: self.attn_state.
+                            group_id:
+                            self.attn_state.
                             graph_capture_get_metadata_for_batch(
                                 batch_size,
                                 is_encoder_decoder_model=self.model_config.
@@ -1707,6 +1717,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             ModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
                 tensor_dict,
                 attn_backend=self.attn_backend,
+                kv_cache_config=self.kv_cache_config,
+                app_attn_metadata_builders=self.app_attn_metadata_builders
             )
         return model_input
 

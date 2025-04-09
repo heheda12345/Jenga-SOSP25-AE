@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
+import torch
 
 logger = init_logger(__name__)
 
@@ -51,6 +52,12 @@ class DistributedGPUExecutor(GPUExecutor):
 
         return num_gpu_blocks, num_cpu_blocks
 
+    def get_available_memory(self) -> Tuple[int, int]:
+        memory_size = self._run_workers("get_available_memory")
+        gpu_memory_size = min(m[0] for m in memory_size)
+        cpu_memory_size = min(m[1] for m in memory_size)
+        return gpu_memory_size, cpu_memory_size
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int,
                          kv_cache_config: Optional[KVCacheConfig]) -> None:
         """Initialize the KV cache in all workers.
@@ -73,6 +80,16 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks,
                           kv_cache_config=kv_cache_config)
+
+    def initialize_cache_from_kv_cache_config(
+            self,
+            kv_cache_config: KVCacheConfig,
+            buffer: Optional[torch.Tensor] = None) -> None:
+        """Initialize the KV cache by invoking the underlying worker.
+        """
+        self._run_workers("initialize_cache_from_kv_cache_config",
+                          kv_cache_config=kv_cache_config,
+                          buffer=buffer)
 
     def execute_model(
         self,

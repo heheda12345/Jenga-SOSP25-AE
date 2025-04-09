@@ -1,7 +1,7 @@
 """Attention backend utils"""
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, TypeVar, Union
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -440,6 +440,62 @@ class LAMetadata(AttentionMetadata):
     to_mutable_src: torch.Tensor
     to_mutable_dst: torch.Tensor
     is_profile_run: bool
+
+    def asdict_zerocopy(self,
+                        skip_fields: Optional[Set[str]] = None
+                        ) -> Dict[str, Any]:
+        """Convert LAMetadata to a dictionary of tensors and bools."""
+        # Get base class fields first
+        d = super().asdict_zerocopy(skip_fields)
+
+        # Add LAMetadata specific fields
+        # Save each step's tensors separately with indexed keys
+        for i, step in enumerate(self.steps):
+            d[f"token_positions_{i}"] = step.token_positions
+            d[f"query_start_loc_{i}"] = step.query_start_loc
+            d[f"cache_indices_{i}"] = step.cache_indices
+            d[f"context_lens_tensor_{i}"] = step.context_lens_tensor
+            d[f"prev_block_table_{i}"] = step.prev_block_table
+            d[f"curr_block_table_{i}"] = step.curr_block_table
+
+        # Save number of steps and other attributes
+        d["num_steps"] = len(self.steps)
+        d["need_final_copy"] = self.need_final_copy
+        d["to_mutable_src"] = self.to_mutable_src
+        d["to_mutable_dst"] = self.to_mutable_dst
+        d["is_profile_run"] = self.is_profile_run
+
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "LAMetadata":
+        """Create LAMetadata from a dictionary of tensors and bools."""
+        # Get base class fields
+        base_fields = {
+            field.name: d[field.name]
+            for field in fields(AttentionMetadata) if field.name in d
+        }
+
+        num_steps = d["num_steps"]
+        steps = []
+
+        # Reconstruct each step from indexed tensors
+        for i in range(num_steps):
+            step = LAMetadata.Step(
+                token_positions=d[f"token_positions_{i}"],
+                query_start_loc=d[f"query_start_loc_{i}"],
+                cache_indices=d[f"cache_indices_{i}"],
+                context_lens_tensor=d[f"context_lens_tensor_{i}"],
+                prev_block_table=d[f"prev_block_table_{i}"],
+                curr_block_table=d[f"curr_block_table_{i}"])
+            steps.append(step)
+
+        return cls(**base_fields,
+                   steps=steps,
+                   need_final_copy=d["need_final_copy"],
+                   to_mutable_src=d["to_mutable_src"],
+                   to_mutable_dst=d["to_mutable_dst"],
+                   is_profile_run=d["is_profile_run"])
 
 
 class LAMetadataBuilder(CommonMetadataBuilder):

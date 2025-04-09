@@ -260,7 +260,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         if self.do_metadata_broadcast:
             broadcast_data = worker_input.as_broadcastable_tensor_dict()
-            broadcast_data.update(model_input.as_broadcastable_tensor_dict())
+            broadcast_data.update(
+                model_input.as_broadcastable_tensor_dict(self.kv_cache_config))
             broadcast_data.update(kwargs)
             broadcast_tensor_dict(broadcast_data, src=0)
 
