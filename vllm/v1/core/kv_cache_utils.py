@@ -769,6 +769,49 @@ def _get_kv_cache_config_uniform_page_size(
     return kv_cache_config
 
 
+def _get_kv_cache_config_max_page(vllm_config: VllmConfig,
+                                  kv_cache_spec: dict[str, KVCacheSpec],
+                                  available_memory: int) -> KVCacheConfig:
+    """
+    Generates the KV cache configuration for a model with max page allocator.
+    """
+    # Group all layers by type_id.
+    # E.g., 2 full attention layers and 4 sliding window attention layers,
+    # -> (full.0, full.1), (sw.0, sw.1, sw.2, sw.3).
+    same_type_layers: dict[str, list[str]] = defaultdict(list)
+    for layer_name, layer_spec in kv_cache_spec.items():
+        same_type_layers[layer_spec.type_id].append(layer_name)
+
+    max_group_size = max(len(layers) for layers in same_type_layers.values())
+    max_group_size_type_id = None
+    for type_id, layers in same_type_layers.items():
+        if len(layers) == max_group_size:
+            max_group_size_type_id = type_id
+            break
+
+    if max_group_size_type_id is None:
+        raise ValueError("No layer group with the maximum size found.")
+
+    kv_cache_spec_max_group = {
+        layer_name: kv_cache_spec[layer_name]
+        for layer_name in same_type_layers[max_group_size_type_id]
+    }
+    kv_cache_config = _get_kv_cache_config_uniform_type(
+        vllm_config, kv_cache_spec_max_group, available_memory)
+
+    for layer_type_id, layers in same_type_layers.items():
+        if layer_type_id == max_group_size_type_id:
+            continue
+        for layer_name, layer_name_max_group in zip(
+                layers, same_type_layers[max_group_size_type_id]):
+            kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
+                reused_layer_name=layer_name_max_group)
+
+    kv_cache_config.kv_cache_groups = create_kv_cache_group_specs(
+        kv_cache_spec, same_type_layers.values())
+    return kv_cache_config
+
+
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     Only models with one type of KV cache are supported yet. This function tries
@@ -828,6 +871,9 @@ def get_kv_cache_config(vllm_config: VllmConfig,
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
     if vllm_config.cache_config.disable_hybrid_allocator:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
+    if vllm_config.cache_config.max_page_allocator:
+        return _get_kv_cache_config_max_page(vllm_config, kv_cache_spec,
+                                             available_memory)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for

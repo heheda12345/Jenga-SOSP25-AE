@@ -1153,6 +1153,8 @@ class CacheConfig:
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
         disable_hybrid_allocator: Whether to disable the hybrid allocator (Only 
         affects v1).
+        max_page_allocator: Whether to use the max page allocator.
+        static_partition_allocator: Whether to use the static partition allocator.
     """
 
     def compute_hash(self) -> str:
@@ -1188,6 +1190,8 @@ class CacheConfig:
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
         disable_hybrid_allocator: bool = False,
+        max_page_allocator: bool = False,
+        static_partition_allocator: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1201,6 +1205,8 @@ class CacheConfig:
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
         self.disable_hybrid_allocator = disable_hybrid_allocator
+        self.max_page_allocator = max_page_allocator
+        self.static_partition_allocator = static_partition_allocator
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -3768,7 +3774,11 @@ class VllmConfig:
             f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}")
+            f"compilation_config={self.compilation_config!r}"
+            f"disable_hybrid_allocator={self.cache_config.disable_hybrid_allocator}"
+            f"max_page_allocator={self.cache_config.max_page_allocator}"
+            f"static_partition_allocator={self.cache_config.static_partition_allocator}"
+        )
 
 
 _current_vllm_config: Optional[VllmConfig] = None

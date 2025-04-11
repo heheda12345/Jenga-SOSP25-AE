@@ -26,13 +26,16 @@ class BlockPool:
         enable_caching: Whether to enable prefix caching.
     """
 
-    def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+    def __init__(self,
+                 num_gpu_blocks: int,
+                 enable_caching: bool,
+                 start_idx: int = 0):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx + start_idx) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is

@@ -65,6 +65,7 @@ class Scheduler(SchedulerInterface):
 
         # Create the KV cache manager.
         self.kv_cache_manager = init_kv_cache_manager(
+            cache_config=cache_config,
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=cache_config.enable_prefix_caching,
@@ -326,7 +327,9 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
-
+                logger.info(
+                    f"cached_num_computed_tokens: {request.request_id} {num_computed_tokens}"
+                )
                 self.waiting.popleft()
                 if request.use_structured_output:
                     structured_output_request_ids[

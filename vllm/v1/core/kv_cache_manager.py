@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
+from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
 from vllm.v1.core.block_pool import BlockPool
@@ -416,6 +417,7 @@ class KVCacheManager:
 
 
 def init_kv_cache_manager(
+    cache_config: CacheConfig,
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     enable_caching: bool = True,
@@ -424,6 +426,15 @@ def init_kv_cache_manager(
     log_stats: bool = False,
 ) -> Union[KVCacheManager, "HybridKVCacheManager"]:
     from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
+    from vllm.v1.core.static_partition_manager import StaticPartitionKVCacheManager
+    if cache_config.static_partition_allocator:
+        logger.info(
+            "Initializing StaticPartitionKVCacheManager with KVCacheConfig: %s",
+            kv_cache_config)
+        return StaticPartitionKVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+        )
     if len(kv_cache_config.kv_cache_groups) > 1:
         logger.info("Initializing HybridKVCacheManager with KVCacheConfig: %s",
                     kv_cache_config)

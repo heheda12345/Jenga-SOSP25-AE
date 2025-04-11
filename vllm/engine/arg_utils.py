@@ -209,6 +209,8 @@ class EngineArgs:
 
     calculate_kv_scales: Optional[bool] = None
     disable_hybrid_allocator: bool = False
+    max_page_allocator: bool = False
+    static_partition_allocator: bool = False
 
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
@@ -988,6 +990,15 @@ class EngineArgs:
             default=False,
             help="Disable the hybrid allocator. This only affects v1.")
 
+        parser.add_argument("--max-page-allocator",
+                            action="store_true",
+                            default=False,
+                            help="Use max page allocator.")
+        parser.add_argument("--static-partition-allocator",
+                            action="store_true",
+                            default=False,
+                            help="Use static partition allocator.")
+
         parser.add_argument(
             "--additional-config",
             type=json.loads,
@@ -1213,6 +1224,8 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             disable_hybrid_allocator=self.disable_hybrid_allocator,
+            max_page_allocator=self.max_page_allocator,
+            static_partition_allocator=self.static_partition_allocator,
         )
 
         # Get the current placement group if Ray is initialized and
