@@ -228,7 +228,8 @@ class LocalChunkManager(SpecializedManager):
         cur_chunk_idx = max(
             cdiv(len(block_hashes), self.local_chunk_num_blocks) - 1, 0)
         if computed_blocks is None:
-            computed_blocks = [self._null_block] * cur_chunk_idx
+            computed_blocks = [self._null_block
+                               ] * cur_chunk_idx * self.local_chunk_num_blocks
         else:
             prev_chunk_idx = max(
                 cdiv(len(computed_blocks), self.local_chunk_num_blocks) - 1, 0)
@@ -266,9 +267,8 @@ class LocalChunkManager(SpecializedManager):
         num_skipped_blocks = num_skipped_chunks * self.local_chunk_num_blocks
         # need to reserve the last computed block as BlockPool.cache_full_blocks
         # uses it
-        num_skipped_blocks = min(
-            num_skipped_blocks,
-            cdiv(num_computed_tokens, self.block_size) - 1)
+        num_skipped_blocks = min(num_skipped_blocks,
+                                 num_computed_tokens // self.block_size - 1)
         removed_blocks: list[KVCacheBlock] = []
         # print("before remove", len(blocks), [b.block_id for b in blocks])
         for i in range(num_skipped_blocks - 1, -1, -1):
