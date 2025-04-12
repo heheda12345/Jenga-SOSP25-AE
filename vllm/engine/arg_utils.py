@@ -111,6 +111,7 @@ class EngineArgs:
     use_per_layer_block_manager: bool = False  # TODO: use cleaner flag after v1 is deprecated
     enable_two_level_page: bool = False
     max_page_allocator: bool = False
+    static_partition_allocator: bool = False
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     layer_grouping: bool = True
@@ -405,6 +406,10 @@ class EngineArgs:
         parser.add_argument('--max-page-allocator',
                             action='store_true',
                             help='Use max page size for block manager')
+        parser.add_argument(
+            '--static-partition-allocator',
+            action='store_true',
+            help='Use static partition allocator for block manager')
         parser.add_argument(
             '--layer-grouping',
             type=bool,
@@ -1039,6 +1044,7 @@ class EngineArgs:
             use_per_layer_block_manager=self.use_per_layer_block_manager,
             enable_two_level_page=self.enable_two_level_page,
             max_page_allocator=self.max_page_allocator,
+            static_partition_allocator=self.static_partition_allocator,
             disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
@@ -1078,6 +1084,7 @@ class EngineArgs:
             use_per_layer_block_manager=self.use_per_layer_block_manager,
             enable_two_level_page=self.enable_two_level_page,
             max_page_allocator=self.max_page_allocator,
+            static_partition_allocator=self.static_partition_allocator,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,

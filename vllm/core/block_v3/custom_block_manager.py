@@ -18,7 +18,7 @@ from vllm.core.interfaces import ComputedBlock
 from vllm.utils import Device, get_dtype_size
 from vllm.sequence import Sequence, SequenceGroup
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
-from vllm.core.block_v3.custom_block import AppAwareManager, LinearAttentionManager, SharedBlockManager, SlidingWindowManager
+from vllm.core.block_v3.custom_block import AppAwareManager, EncoderDecoderManager, LinearAttentionManager, SelfAttentionManager, SharedBlockManager, SlidingWindowManager
 from vllm.logger import init_logger
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block_v3.range_utils import intersect_multiple_sets, to_range
@@ -117,6 +117,36 @@ class CustomBlockManager:
         if self.scheduler_config.enable_two_level_page:
             self.global_block_allocator = LargeBlockIDAllocator(
                 num_blocks=self.num_total_gpu_blocks)
+            if self.scheduler_config.static_partition_allocator:
+                ratios = {}
+                for group_id, layer_ids in kv_cache_config.block_table_sharing.items(
+                ):
+                    small_page_size = kv_cache_config.components[
+                        layer_ids[0]].page_size * len(layer_ids)
+                    manager = self._app_aware_managers[layer_ids[0]]
+                    if isinstance(
+                            manager,
+                        (SelfAttentionManager, EncoderDecoderManager)):
+                        ratios[group_id] = small_page_size
+                    elif isinstance(
+                            manager,
+                        (SlidingWindowManager, LinearAttentionManager)):
+                        ratios[group_id] = small_page_size * 0.5
+                    else:
+                        raise NotImplementedError
+                total_ratio = sum(ratios.values())
+                max_num_large_blocks = {
+                    group_id:
+                    int(self.num_total_gpu_blocks * ratio / total_ratio)
+                    for group_id, ratio in ratios.items()
+                }
+                print("max_num_large_blocks static", max_num_large_blocks)
+            else:
+                max_num_large_blocks = {
+                    group_id: self.num_total_gpu_blocks * 1000
+                    for group_id in kv_cache_config.block_table_sharing.keys()
+                }
+
             if self.cache_config.enable_prefix_caching:
                 self.group_allocators = {}
                 level1_evictors = {}
@@ -135,6 +165,8 @@ class CustomBlockManager:
                             schedule_component.large_small_ratio,
                             'large_block_id_allocator':
                             self.global_block_allocator,
+                            'max_num_large_blocks':
+                            max_num_large_blocks[group_id],
                         },
                         allocator_type="prefix_caching",
                     )
@@ -167,6 +199,8 @@ class CustomBlockManager:
                             schedule_component.large_small_ratio,
                             'large_block_id_allocator':
                             self.global_block_allocator,
+                            'max_num_large_blocks':
+                            max_num_large_blocks[group_id],
                         },
                         allocator_type="naive")
                     # TODO: only allocate null block when needed
@@ -462,7 +496,7 @@ class CustomBlockManager:
                                     parallel_config: ParallelConfig,
                                     prefix: str = ""):
         managers = BLOCK_MANAGER_REGISTRY.get_managers_of_model(
-            model, self.cache_config, parallel_config)
+            model, self.cache_config, parallel_config, self.scheduler_config)
         self.add_app_aware_managers({
             f"{prefix}{layer_id}": manager
             for layer_id, manager in managers.items()
@@ -537,7 +571,21 @@ class CustomBlockManager:
         if self.scheduler_config.enable_two_level_page:
             num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
                 num_required_blocks, seq_group.seqs[0].seq_id)
-            total_blocks = sum(num_large_blocks_min.values())
+            total_blocks = -1
+            for group_id in num_large_blocks_min.keys():
+                if self.cache_config.enable_prefix_caching:
+                    block_id_allocator = self.group_allocators[
+                        group_id]._hashless_allocator._block_id_allocator
+                else:
+                    block_id_allocator = self.group_allocators[
+                        group_id]._block_id_allocator
+                if num_large_blocks_min[group_id] > \
+                        block_id_allocator.max_num_large_blocks - \
+                        block_id_allocator.num_large_block:
+                    total_blocks = 1000000000  # a very large number
+                    break
+            if total_blocks == -1:
+                total_blocks = sum(num_large_blocks_min.values())
         else:
             total_blocks = sum(num_required_blocks.values())
         return total_blocks
@@ -598,7 +646,21 @@ class CustomBlockManager:
         if self.scheduler_config.enable_two_level_page:
             num_large_blocks_min, num_large_blocks_max = self.get_num_required_block_small_to_large(
                 num_required_blocks, seq.seq_id)
-            total_blocks = sum(num_large_blocks_min.values())
+            total_blocks = -1
+            for group_id in num_large_blocks_min.keys():
+                if self.cache_config.enable_prefix_caching:
+                    block_id_allocator = self.group_allocators[
+                        group_id]._hashless_allocator._block_id_allocator
+                else:
+                    block_id_allocator = self.group_allocators[
+                        group_id]._block_id_allocator
+                if num_large_blocks_min[group_id] > \
+                        block_id_allocator.max_num_large_blocks - \
+                        block_id_allocator.num_large_block:
+                    total_blocks = 1000000000  # a very large number
+                    break
+            if total_blocks == -1:
+                total_blocks = sum(num_large_blocks_min.values())
         else:
             total_blocks = sum(num_required_blocks.values())
         return total_blocks

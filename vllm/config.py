@@ -998,6 +998,7 @@ class SchedulerConfig:
                  use_per_layer_block_manager: bool = False,
                  enable_two_level_page: bool = False,
                  max_page_allocator: bool = False,
+                 static_partition_allocator: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -1052,6 +1053,7 @@ class SchedulerConfig:
         self.use_per_layer_block_manager = use_per_layer_block_manager
         self.enable_two_level_page = enable_two_level_page
         self.max_page_allocator = max_page_allocator
+        self.static_partition_allocator = static_partition_allocator
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
@@ -1165,6 +1167,7 @@ class SpeculativeConfig:
         use_per_layer_block_manager: bool,
         enable_two_level_page: bool,
         max_page_allocator: bool,
+        static_partition_allocator: bool,
         disable_log_stats: bool,
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
