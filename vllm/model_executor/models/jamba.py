@@ -47,14 +47,15 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 def custom_block_manager_for_jamba(model_config: ModelConfig,
                                    cache_config: CacheConfig,
-                                   parallel_config: ParallelConfig):
+                                   parallel_config: ParallelConfig,
+                                   scheduler_config: SchedulerConfig):
 
     def _get_mamba_cache_shape(hf_config: JambaConfig) -> List[List[int]]:
         world_size = parallel_config.world_size
         hidden_size = hf_config.hidden_size
         conv_state_shape = (
             hf_config.mamba_expand * hidden_size // world_size,
-            hf_config.mamba_d_conv - 1,
+            hf_config.mamba_d_conv,
         )
         ssm_shape = (
             hf_config.mamba_expand * hidden_size // world_size,
@@ -71,6 +72,14 @@ def custom_block_manager_for_jamba(model_config: ModelConfig,
             custom_managers[str(i) + '-conv'] = LinearAttentionManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.linear_chunk_size, conv_shape)
+            if scheduler_config.max_page_allocator:
+                for j in range(3):
+                    custom_managers['dummy-' + str(i) + '-conv-' +
+                                    str(j)] = LinearAttentionManager(
+                                        model_config, parallel_config,
+                                        cache_config.cache_dtype,
+                                        cache_config.linear_chunk_size,
+                                        conv_shape)
             custom_managers[str(i) + '-ssm'] = LinearAttentionManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.linear_chunk_size, ssm_shape)
@@ -78,7 +87,13 @@ def custom_block_manager_for_jamba(model_config: ModelConfig,
             custom_managers[str(i)] = SelfAttentionManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.block_size)
-
+            if scheduler_config.max_page_allocator:
+                for j in range(27):
+                    custom_managers['dummy-' + str(i) + '-' +
+                                    str(j)] = SelfAttentionManager(
+                                        model_config, parallel_config,
+                                        cache_config.cache_dtype,
+                                        cache_config.block_size)
     return custom_managers
 
 

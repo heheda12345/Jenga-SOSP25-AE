@@ -1130,7 +1130,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.scheduler_config.use_per_layer_block_manager:
             assert kv_cache_config is not None
             app_attn_metadata_builders = BLOCK_MANAGER_REGISTRY \
-                .get_managers_of_model(self.model_config, self.cache_config, self.parallel_config)
+                .get_managers_of_model(self.model_config, self.cache_config, self.parallel_config, self.scheduler_config)
             assert len(self.app_attn_metadata_builders) == 0
             self.app_attn_metadata_builders = {
                 group_id: app_attn_metadata_builders[layer_ids[0]]

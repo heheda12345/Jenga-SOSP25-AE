@@ -29,7 +29,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block_v3.custom_block import SelfAttentionManager, SlidingWindowManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -61,7 +61,8 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
 # TEST code, to be removed later
 def custom_block_manager_for_llama(model_config: ModelConfig,
                                    cache_config: CacheConfig,
-                                   parallel_config: ParallelConfig):
+                                   parallel_config: ParallelConfig,
+                                   scheduler_config: SchedulerConfig):
     custom_managers = {}
     if hasattr(model_config.hf_config, 'sliding_window'):
         sliding_window = model_config.hf_config.sliding_window
@@ -85,6 +86,18 @@ def custom_block_manager_for_llama(model_config: ModelConfig,
             custom_managers[str(i)] = SlidingWindowManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.block_size, sliding_window[i])
+    if scheduler_config.max_page_allocator:
+        num_self_attention_layers = len(
+            [x for x in sliding_window if x is None])
+        num_sliding_window_layers = len(
+            [x for x in sliding_window if x is not None])
+        if num_sliding_window_layers > 0:
+            assert num_self_attention_layers <= num_sliding_window_layers
+            for i in range(num_self_attention_layers,
+                           num_sliding_window_layers):
+                custom_managers['dummy-' + str(i)] = SelfAttentionManager(
+                    model_config, parallel_config, cache_config.cache_dtype,
+                    cache_config.block_size)
     return custom_managers
 
 

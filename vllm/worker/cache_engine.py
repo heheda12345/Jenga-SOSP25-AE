@@ -196,7 +196,9 @@ class CacheEngineV3:
         for layer_id, component in self.kv_cache_config.components.items():
             if isinstance(component, KVPageType):
                 assert component.page_size == reduce(operator.mul,
-                                                     kv_cache_layout) * 2
+                                                     kv_cache_layout) * 2, \
+                    f"component.page_size: {component.page_size}, " \
+                    f"kv_cache_layout: {kv_cache_layout}"
                 half_page_size = component.page_size // 2
                 assert half_page_size % 2 == 0
                 assert component.num_elements % component.page_size == 0

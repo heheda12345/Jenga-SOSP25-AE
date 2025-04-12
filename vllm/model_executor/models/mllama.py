@@ -35,7 +35,7 @@ from transformers.models.mllama.processing_mllama import (
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import CacheConfig, MultiModalConfig, ParallelConfig
+from vllm.config import CacheConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
@@ -219,7 +219,8 @@ def _prepare_aspect_ratio_attention_mask(
 
 def custom_block_manager_for_mllama(
         model_config: config_mllama.MllamaConfig, cache_config: CacheConfig,
-        parallel_config: ParallelConfig) -> Dict[str, AppAwareManager]:
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig) -> Dict[str, AppAwareManager]:
     cross_attention_layers = model_config.hf_config.\
         text_config.cross_attention_layers
     custom_managers = {}
@@ -228,6 +229,13 @@ def custom_block_manager_for_mllama(
             custom_managers[str(i)] = EncoderDecoderManager(
                 model_config, parallel_config, cache_config.cache_dtype,
                 cache_config.block_size)
+            if scheduler_config.max_page_allocator:
+                for j in range(3):
+                    custom_managers[str(i) + '-dummy' +
+                                    str(j)] = EncoderDecoderManager(
+                                        model_config, parallel_config,
+                                        cache_config.cache_dtype,
+                                        cache_config.block_size)
         else:
             custom_managers[str(i)] = SelfAttentionManager(
                 model_config, parallel_config, cache_config.cache_dtype,
@@ -1273,8 +1281,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         # For 1) text-only prefill and decode, 2) image-present decode.
         if image_inputs is None:
             full_text_row_masked_out_mask = (
-                encoder_attn_metadata.encoder_seq_lens_tensor != 0).reshape(
-                    -1, 1).to(input_ids.device)
+                encoder_attn_metadata.encoder_seq_lens_tensor
+                != 0).reshape(-1, 1).to(input_ids.device)
             skip_cross_attention = max(
                 encoder_attn_metadata.encoder_seq_lens) == 0
 

@@ -10,7 +10,7 @@ class SmallBlockIDAllocator:
 
     def __init__(self, ref_counter: RefCounter,
                  large_block_id_allocator: LargeBlockIDAllocator,
-                 large_small_ratio: int):
+                 large_small_ratio: int, max_num_large_block: int):
         self.large_small_ratio = large_small_ratio
 
         # update when alloc/free small blocks
@@ -32,6 +32,7 @@ class SmallBlockIDAllocator:
         self.large_block_to_seq_id: Dict[int, int] = {}
         self.add_seq(NULL_BLOCK_SEQ_ID)
         self.num_large_block = 0
+        self.max_num_large_block = max_num_large_block
 
     class NoFreeLevel1BlocksError(ValueError):
         pass
@@ -45,7 +46,7 @@ class SmallBlockIDAllocator:
             affine_only: bool = False
     ) -> Tuple[int, List[int]]:  # small_block_id
         if len(self.free_block_id_with_prefer[seq_id]) == 0:
-            if self.new_large_block_quota > 0:
+            if self.new_large_block_quota > 0 and self.num_large_block < self.max_num_large_block:
                 # allocate new large block
                 new_large_block_id = self.large_block_id_allocator.allocate_block_id(
                 )
