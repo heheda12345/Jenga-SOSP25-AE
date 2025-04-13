@@ -728,6 +728,9 @@ def _get_kv_cache_config_uniform_page_size(
     same_type_layers: dict[str, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec.type_id].append(layer_name)
+    for type_id, layers in same_type_layers.items():
+        if len(layers) == 29:  # special case for gemma-3-4b-it
+            layers.append('dummy_layer')
 
     # Split each group into smaller groups, to make the number of layers in
     # each group identical.
@@ -739,7 +742,11 @@ def _get_kv_cache_config_uniform_page_size(
     grouped_layers = []
     for layers in same_type_layers.values():
         for i in range(0, len(layers), group_size_gcd):
-            grouped_layers.append(layers[i:i + group_size_gcd])
+            grouped_layer = layers[i:i + group_size_gcd]
+            grouped_layer = [
+                layer for layer in grouped_layer if layer != 'dummy_layer'
+            ]
+            grouped_layers.append(grouped_layer)
 
     # Divide the available memory equally among all layers in the first group.
     # The memory layout in the example will be:
@@ -759,8 +766,8 @@ def _get_kv_cache_config_uniform_page_size(
     # Layers of different groups have different block table, so they will
     # use different parts of the shared Tensor.
     for layers in grouped_layers[1:]:
-        for layer_name, layer_name_first_group in zip(layers,
-                                                      grouped_layers[0]):
+        for layer_name, layer_name_first_group in zip(
+                layers, grouped_layers[0][:len(layers)]):
             kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
                 reused_layer_name=layer_name_first_group)
 
