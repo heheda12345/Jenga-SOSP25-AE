@@ -187,8 +187,10 @@ class HybridKVCacheManager:
             #     # Add back the last block hash if it was removed.
             #     block_hashes.append(last_block_hash)
 
-            self.prefix_cache_stats.queries += len(block_hashes)
-            self.prefix_cache_stats.hits += len(computed_blocks)
+            self.prefix_cache_stats.queries += sum(
+                len(block_hash) for block_hash in block_hashes)
+            self.prefix_cache_stats.hits += sum(
+                len(computed_block) for computed_block in computed_blocks)
             return HybridKVCacheBlocks(computed_blocks), num_computed_tokens
         else:
             # Skip cache hits for prompt logprobs
