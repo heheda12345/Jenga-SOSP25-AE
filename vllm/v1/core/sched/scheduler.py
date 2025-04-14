@@ -330,6 +330,10 @@ class Scheduler(SchedulerInterface):
                 logger.info(
                     f"cached_num_computed_tokens: {request.request_id} {num_computed_tokens}"
                 )
+                prefix_stats = self.kv_cache_manager.prefix_cache_stats
+                logger.info(
+                    f"prefix_hit_rate: {prefix_stats.queries} {prefix_stats.hits} {prefix_stats.hits / prefix_stats.queries}"
+                )
                 self.waiting.popleft()
                 if request.use_structured_output:
                     structured_output_request_ids[
