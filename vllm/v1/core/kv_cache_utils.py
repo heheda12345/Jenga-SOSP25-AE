@@ -121,6 +121,8 @@ class KVCacheBlock:
     # It is only available when the block is full.
     _block_hash: Optional[BlockHashType] = None
 
+    _is_important: bool = False
+
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
@@ -141,6 +143,16 @@ class KVCacheBlock:
         assert self.block_hash is None, (
             "The block already has a hash. This should not happen.")
         self._block_hash = block_hash
+
+    @property
+    def is_important(self) -> bool:
+        return self._is_important
+
+    @is_important.setter
+    def is_important(self, is_important: bool):
+        if is_important:
+            assert self.ref_cnt > 0, "Only change the importance of a block that is allocated"
+        self._is_important = is_important
 
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
@@ -185,14 +197,17 @@ class FreeKVCacheBlockQueue:
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
-        # Initialize the doubly linked list of free blocks.
-        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
-        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
-        for i in range(self.num_free_blocks):
-            if i > 0:
-                blocks[i].prev_free_block = blocks[i - 1]
-            if i < self.num_free_blocks - 1:
-                blocks[i].next_free_block = blocks[i + 1]
+        if len(blocks) > 0:
+            # Initialize the doubly linked list of free blocks.
+            self.free_list_head: Optional[KVCacheBlock] = blocks[0]
+            self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
+            for i in range(self.num_free_blocks):
+                if i > 0:
+                    blocks[i].prev_free_block = blocks[i - 1]
+                if i < self.num_free_blocks - 1:
+                    blocks[i].next_free_block = blocks[i + 1]
+        else:
+            self.free_list_head = self.free_list_tail = None
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.

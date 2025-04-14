@@ -1192,6 +1192,8 @@ class CacheConfig:
         disable_hybrid_allocator: bool = False,
         max_page_allocator: bool = False,
         static_partition_allocator: bool = False,
+        max_num_important_blocks: int = 0,
+        important_block_mode: str = "",
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1207,6 +1209,8 @@ class CacheConfig:
         self.disable_hybrid_allocator = disable_hybrid_allocator
         self.max_page_allocator = max_page_allocator
         self.static_partition_allocator = static_partition_allocator
+        self.max_num_important_blocks = max_num_important_blocks
+        self.important_block_mode = important_block_mode
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()

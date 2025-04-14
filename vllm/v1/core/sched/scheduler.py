@@ -70,6 +70,9 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             enable_caching=cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+            max_num_important_blocks=self.cache_config.
+            max_num_important_blocks,
+            important_block_mode=self.cache_config.important_block_mode,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
@@ -113,6 +116,9 @@ class Scheduler(SchedulerInterface):
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
+
+        self.total_prefill_tokens = 0
+        self.total_hit_tokens = 0
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -327,13 +333,19 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
-                logger.info(
-                    f"cached_num_computed_tokens: {request.request_id} {num_computed_tokens}"
-                )
-                prefix_stats = self.kv_cache_manager.prefix_cache_stats
-                logger.info(
-                    f"prefix_hit_rate: {prefix_stats.queries} {prefix_stats.hits} {prefix_stats.hits / prefix_stats.queries}"
-                )
+                if request.status == RequestStatus.WAITING:
+                    logger.info(
+                        f"cached_num_computed_tokens: {request.request_id} {num_computed_tokens}"
+                    )
+                    prefix_stats = self.kv_cache_manager.prefix_cache_stats
+                    logger.info(
+                        f"prefix_hit_rate: {prefix_stats.queries} {prefix_stats.hits} {prefix_stats.hits / prefix_stats.queries}"
+                    )
+                    self.total_prefill_tokens += request.num_tokens
+                    self.total_hit_tokens += num_computed_tokens
+                    logger.info(
+                        f"total_prefill_tokens: {self.total_prefill_tokens} {self.total_hit_tokens} {self.total_hit_tokens / self.total_prefill_tokens}"
+                    )
                 self.waiting.popleft()
                 if request.use_structured_output:
                     structured_output_request_ids[

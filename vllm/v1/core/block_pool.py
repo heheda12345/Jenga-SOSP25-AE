@@ -29,7 +29,8 @@ class BlockPool:
     def __init__(self,
                  num_gpu_blocks: int,
                  enable_caching: bool,
-                 start_idx: int = 0):
+                 start_idx: int = 0,
+                 max_num_important_blocks: int = 0):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
@@ -41,6 +42,8 @@ class BlockPool:
         # list of free blocks (including eviction candidates when caching is
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        self.important_free_block_queue = FreeKVCacheBlockQueue([])
+        self.max_num_important_blocks = max_num_important_blocks
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -182,7 +185,7 @@ class BlockPool:
         while idx < num_blocks:
             # First allocate blocks.
             curr_block = self.free_block_queue.popleft()
-            assert curr_block.ref_cnt == 0
+            assert curr_block.ref_cnt == 0, f"block_id: {curr_block.block_id} ref_cnt: {curr_block.ref_cnt}"
 
             # If the block is cached, evict it.
             if self.enable_caching:
@@ -213,6 +216,7 @@ class BlockPool:
             if len(self.cached_block_hash_to_block[block_hash]) == 0:
                 del self.cached_block_hash_to_block[block_hash]
 
+            block.is_important = False
             return True
         return False
 
@@ -228,7 +232,10 @@ class BlockPool:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0 and block != self.null_block:
-                self.free_block_queue.remove(block)
+                if block.is_important:
+                    self.important_free_block_queue.remove(block)
+                else:
+                    self.free_block_queue.remove(block)
             block.incr_ref()
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
@@ -243,7 +250,14 @@ class BlockPool:
             block.decr_ref()
             # null_block should not be added to the free list.
             if block.ref_cnt == 0 and block != self.null_block:
-                self.free_block_queue.append(block)
+                if block.is_important:
+                    if self.important_free_block_queue.num_free_blocks >= self.max_num_important_blocks:
+                        moved_block = self.important_free_block_queue.popleft()
+                        moved_block.is_important = False
+                        self.free_block_queue.append(moved_block)
+                    self.important_free_block_queue.append(block)
+                else:
+                    self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -254,6 +268,7 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
+        raise NotImplementedError
         num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(

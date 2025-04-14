@@ -50,6 +50,8 @@ class HybridKVCacheManager:
         caching_hash_algo: str = "builtin",
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
+        max_num_important_blocks: int = 0,
+        important_block_mode: str = "",
     ) -> None:
         # TODO: adjust the name for item in one group, list of items in all
         # groups, and reduced item for all groups.
@@ -83,12 +85,17 @@ class HybridKVCacheManager:
             max(g.kv_cache_spec.block_size
                 for g in kv_cache_config.kv_cache_groups))
 
-        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+        self.max_num_important_blocks = max_num_important_blocks
+        self.block_pool = BlockPool(
+            self.num_gpu_blocks,
+            enable_caching,
+            max_num_important_blocks=max_num_important_blocks)
 
         self.specialized_managers = [
             get_specialized_manager(
                 kv_cache_spec=g.kv_cache_spec,
                 block_pool=self.block_pool,
+                enable_important_blocks=self.max_num_important_blocks > 0,
             ) for g in kv_cache_config.kv_cache_groups
         ]
 
@@ -106,6 +113,9 @@ class HybridKVCacheManager:
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
             str, list[list[BlockHashType]]] = defaultdict(lambda: [])
+        self.important_prefix_len: defaultdict[str,
+                                               int] = defaultdict(lambda: -1)
+        self.important_block_mode = important_block_mode
 
         # {req_id: The number of cached blocks for each kv cache group}
         # This is used to track the number of cached blocks for each request.
@@ -163,6 +173,13 @@ class HybridKVCacheManager:
                 for i, g in enumerate(self.kv_cache_config.kv_cache_groups)
             ]
             self.req_to_block_hashes[request.request_id] = block_hashes
+            self.important_prefix_len[request.request_id] = -1
+            if self.max_num_important_blocks > 0:
+                if self.important_block_mode == "long_doc":
+                    self.important_prefix_len[
+                        request.request_id] = request.num_tokens
+                elif self.important_block_mode == "mooncake_sys_prompt":
+                    raise NotImplementedError
 
         self.prefix_cache_stats.requests += 1
         if request.sampling_params.prompt_logprobs is None:
@@ -248,9 +265,11 @@ class HybridKVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
+        important_prefix_len = self.important_prefix_len[request.request_id]
         removed_blocks = [
             manager.remove_skipped_blocks(req_blocks[i],
-                                          request.num_computed_tokens)
+                                          request.num_computed_tokens,
+                                          important_prefix_len)
             for i, manager in enumerate(self.specialized_managers)
         ]
         self._free_blocks(removed_blocks)

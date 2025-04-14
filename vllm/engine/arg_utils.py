@@ -122,6 +122,8 @@ class EngineArgs:
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     prefix_caching_hash_algo: str = "builtin"
+    max_num_important_blocks: int = 0
+    important_block_mode: str = ""
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -486,6 +488,20 @@ class EngineArgs:
             help="Set the hash algorithm for prefix caching. "
             "Options are 'builtin' (Python's built-in hash) or 'sha256' "
             "(collision resistant but with certain overheads).",
+        )
+        parser.add_argument(
+            "--max-num-important-blocks",
+            type=int,
+            default=EngineArgs.max_num_important_blocks,
+            help="The maximum number of important blocks to cache. "
+            "If set to 0, no important blocks will be cached.",
+        )
+        parser.add_argument(
+            "--important-block-mode",
+            type=str,
+            default=EngineArgs.important_block_mode,
+            help="The mode for important blocks. "
+            "Options are 'long_doc' or 'mooncake_sys_prompt'.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -1221,6 +1237,8 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            max_num_important_blocks=self.max_num_important_blocks,
+            important_block_mode=self.important_block_mode,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             disable_hybrid_allocator=self.disable_hybrid_allocator,

@@ -20,6 +20,7 @@ class SpecializedManager(ABC):
         self,
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
+        enable_important_blocks: bool,
     ) -> None:
         """
         Initializes the SpecializedManager.
@@ -31,6 +32,7 @@ class SpecializedManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        self.enable_important_blocks = enable_important_blocks
         # for caching the intermediate states between multiple calls of
         # find_longest_cache_hit
         self.req_cached_blocks: dict[str, list[KVCacheBlock]] = {}
@@ -94,8 +96,11 @@ class SpecializedManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+            self,
+            blocks: list[KVCacheBlock],
+            num_computed_tokens: int,
+            important_prefix: int = -1) -> list[KVCacheBlock]:
         """
         Remove the blocks that are no longer needed from `blocks`. The removed 
         blocks should be replaced by null_block. Return the removed blocks in 
@@ -106,7 +111,7 @@ class SpecializedManager(ABC):
             blocks: The list of blocks to be updated.
             num_computed_tokens: The number of tokens that have been computed.
         Returns:
-            The removed blocks in eviction order.
+            The removed blocks in eviction order, normal and important.
         """
         raise NotImplementedError
 
@@ -133,18 +138,21 @@ class FullAttentionManager(SpecializedManager):
             del computed_blocks[len(block_hashes):]
         return computed_blocks
 
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+            self,
+            blocks: list[KVCacheBlock],
+            num_computed_tokens: int,
+            important_prefix: int = -1) -> list[KVCacheBlock]:
         # No need to remove blocks for full attention.
         return []
 
 
 class SlidingWindowManager(SpecializedManager):
 
-    def __init__(self, kv_cache_spec: SlidingWindowSpec,
-                 block_pool: BlockPool):
-        super().__init__(kv_cache_spec, block_pool)
-        self.sliding_window = kv_cache_spec.sliding_window + 192
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
+                 enable_important_blocks: bool):
+        super().__init__(kv_cache_spec, block_pool, enable_important_blocks)
+        self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
         self.sliding_window_contiguous_blocks = cdiv((self.sliding_window - 1),
@@ -193,12 +201,23 @@ class SlidingWindowManager(SpecializedManager):
         del computed_blocks[num_contiguous_blocks:]
         return computed_blocks
 
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+            self,
+            blocks: list[KVCacheBlock],
+            num_computed_tokens: int,
+            important_prefix: int = -1) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
+        if important_prefix != -1:
+            max_important_block = cdiv(important_prefix, self.block_size)
+            min_important_block = max(
+                0, max_important_block -
+                self.sliding_window_contiguous_blocks - 4)
+        else:
+            min_important_block = -1
+            max_important_block = -1
 
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
@@ -207,6 +226,8 @@ class SlidingWindowManager(SpecializedManager):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
+            if i >= min_important_block and i <= max_important_block:
+                blocks[i].is_important = True
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
         return removed_blocks
@@ -259,8 +280,11 @@ class LocalChunkManager(SpecializedManager):
         #       [b.block_id for b in computed_blocks])
         return computed_blocks
 
-    def remove_skipped_blocks(self, blocks: list[KVCacheBlock],
-                              num_computed_tokens: int) -> list[KVCacheBlock]:
+    def remove_skipped_blocks(
+            self,
+            blocks: list[KVCacheBlock],
+            num_computed_tokens: int,
+            important_prefix: int = -1) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the local chunk and
         # skipped during the attention computation.
         num_skipped_chunks = num_computed_tokens // self.local_chunk
@@ -287,8 +311,9 @@ spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
 }
 
 
-def get_specialized_manager(kv_cache_spec: KVCacheSpec,
-                            block_pool: BlockPool) -> SpecializedManager:
+def get_specialized_manager(
+        kv_cache_spec: KVCacheSpec, block_pool: BlockPool,
+        enable_important_blocks: bool) -> SpecializedManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
-    manager = manager_class(kv_cache_spec, block_pool)
+    manager = manager_class(kv_cache_spec, block_pool, enable_important_blocks)
     return manager
