@@ -61,6 +61,7 @@ class BlockPool:
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
+        # self.null_block.block_hash = BlockHashType(0, ())
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:

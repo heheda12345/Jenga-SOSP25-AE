@@ -163,6 +163,14 @@ class SlidingWindowManager(SpecializedManager):
             self, block_hashes: list[BlockHashType],
             computed_blocks: Optional[list[KVCacheBlock]]
     ) -> list[KVCacheBlock]:
+        # if computed_blocks is None:
+        #     computed_blocks = []
+        #     for block_hash in block_hashes:
+        #         computed_blocks.append(self._null_block)
+        # else:
+        #     assert len(computed_blocks) >= len(block_hashes)
+        #     del computed_blocks[len(block_hashes):]
+        # return computed_blocks
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(len(block_hashes)) to
         # O(len(block_hashes) / sliding_window_contiguous_blocks +

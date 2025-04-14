@@ -151,7 +151,7 @@ class KVCacheBlock:
     @is_important.setter
     def is_important(self, is_important: bool):
         if is_important:
-            assert self.ref_cnt > 0, "Only change the importance of a block that is allocated"
+            assert self.ref_cnt > 0 or self.block_id == 0, "Only change the importance of a block that is allocated"
         self._is_important = is_important
 
     def reset_hash(self):

@@ -123,6 +123,10 @@ class HybridKVCacheManager:
         # data for reempted ones.
         self.num_cached_block: dict[str, list[int]] = {}
         self.prefix_cache_stats = PrefixCacheStats()
+        self.mooncake_sys_prompts = {
+            0, 74, 75, 76, 77, 78, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+            57
+        }
 
     @property
     def usage(self) -> float:
@@ -179,6 +183,18 @@ class HybridKVCacheManager:
                     self.important_prefix_len[
                         request.request_id] = request.num_tokens
                 elif self.important_block_mode == "mooncake_sys_prompt":
+                    important_prefix_len = 0
+                    for i, token_id in enumerate(request.prompt_token_ids):
+                        if token_id - 1000 in self.mooncake_sys_prompts:
+                            important_prefix_len += 1
+                        else:
+                            break
+                    self.important_prefix_len[
+                        request.request_id] = important_prefix_len
+                    logger.info(
+                        f"important_prefix_len: {request.request_id} {important_prefix_len}"
+                    )
+                else:
                     raise NotImplementedError
 
         self.prefix_cache_stats.requests += 1
