@@ -125,6 +125,7 @@ class EngineArgs:
     max_num_important_blocks: int = 0
     important_block_mode: str = ""
     static_lru: bool = False
+    full_hit: bool = False
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -509,6 +510,13 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             default=EngineArgs.static_lru,
             help="If set to True, use static LRU for important blocks. "
+            "If set to False, use dynamic LRU for important blocks.",
+        )
+        parser.add_argument(
+            "--full-hit",
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.full_hit,
+            help="If set to True, use full hit for important blocks. "
             "If set to False, use dynamic LRU for important blocks.",
         )
         parser.add_argument('--disable-sliding-window',
@@ -1248,6 +1256,7 @@ class EngineArgs:
             max_num_important_blocks=self.max_num_important_blocks,
             important_block_mode=self.important_block_mode,
             static_lru=self.static_lru,
+            full_hit=self.full_hit,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             disable_hybrid_allocator=self.disable_hybrid_allocator,

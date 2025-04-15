@@ -158,11 +158,15 @@ class SlidingWindowManager(SpecializedManager):
         self.sliding_window_contiguous_blocks = cdiv((self.sliding_window - 1),
                                                      self.block_size)
         self._null_block = block_pool.null_block
+        self.full_hit = False
 
     def _find_longest_cache_hit(
             self, block_hashes: list[BlockHashType],
             computed_blocks: Optional[list[KVCacheBlock]]
     ) -> list[KVCacheBlock]:
+        if self.full_hit:
+            return FullAttentionManager._find_longest_cache_hit(
+                self, block_hashes, computed_blocks)
         # if computed_blocks is None:
         #     computed_blocks = []
         #     for block_hash in block_hashes:

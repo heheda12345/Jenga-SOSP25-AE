@@ -1195,6 +1195,7 @@ class CacheConfig:
         max_num_important_blocks: int = 0,
         important_block_mode: str = "",
         static_lru: bool = False,
+        full_hit: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1213,7 +1214,7 @@ class CacheConfig:
         self.max_num_important_blocks = max_num_important_blocks
         self.important_block_mode = important_block_mode
         self.static_lru = static_lru
-        logger.info(f"CacheConfig init static_lru: {static_lru}")
+        self.full_hit = full_hit
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()

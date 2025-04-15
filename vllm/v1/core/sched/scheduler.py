@@ -74,6 +74,7 @@ class Scheduler(SchedulerInterface):
             max_num_important_blocks,
             important_block_mode=self.cache_config.important_block_mode,
             static_lru=self.cache_config.static_lru,
+            full_hit=self.cache_config.full_hit,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 

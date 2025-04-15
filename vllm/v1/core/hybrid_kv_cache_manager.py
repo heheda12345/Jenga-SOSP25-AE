@@ -10,7 +10,7 @@ from vllm.v1.core.block_pool import BlockPool, StaticLRUBlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocksInterface
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
-from vllm.v1.core.specialized_manager import get_specialized_manager
+from vllm.v1.core.specialized_manager import SlidingWindowManager, get_specialized_manager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -53,6 +53,7 @@ class HybridKVCacheManager:
         max_num_important_blocks: int = 0,
         important_block_mode: str = "",
         static_lru: bool = False,
+        full_hit: bool = False,
     ) -> None:
         # TODO: adjust the name for item in one group, list of items in all
         # groups, and reduced item for all groups.
@@ -105,6 +106,10 @@ class HybridKVCacheManager:
                 enable_important_blocks=self.max_num_important_blocks > 0,
             ) for g in kv_cache_config.kv_cache_groups
         ]
+        if full_hit:
+            for manager in self.specialized_managers:
+                if isinstance(manager, SlidingWindowManager):
+                    manager.full_hit = True
 
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
 
