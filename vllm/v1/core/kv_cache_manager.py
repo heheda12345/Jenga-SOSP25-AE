@@ -427,6 +427,7 @@ def init_kv_cache_manager(
     log_stats: bool = False,
     max_num_important_blocks: int = 0,
     important_block_mode: str = "",
+    static_lru: bool = False,
 ) -> Union[KVCacheManager, "HybridKVCacheManager"]:
     from vllm.v1.core.hybrid_kv_cache_manager import HybridKVCacheManager
     from vllm.v1.core.static_partition_manager import StaticPartitionKVCacheManager
@@ -450,6 +451,7 @@ def init_kv_cache_manager(
             log_stats=log_stats,
             max_num_important_blocks=max_num_important_blocks,
             important_block_mode=important_block_mode,
+            static_lru=static_lru,
         )
     else:
         logger.info("Initializing KVCacheManager with KVCacheConfig: %s",

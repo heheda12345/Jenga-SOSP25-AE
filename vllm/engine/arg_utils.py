@@ -124,6 +124,7 @@ class EngineArgs:
     prefix_caching_hash_algo: str = "builtin"
     max_num_important_blocks: int = 0
     important_block_mode: str = ""
+    static_lru: bool = False
     disable_sliding_window: bool = False
     disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
@@ -502,6 +503,13 @@ class EngineArgs:
             default=EngineArgs.important_block_mode,
             help="The mode for important blocks. "
             "Options are 'long_doc' or 'mooncake_sys_prompt'.",
+        )
+        parser.add_argument(
+            "--static-lru",
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.static_lru,
+            help="If set to True, use static LRU for important blocks. "
+            "If set to False, use dynamic LRU for important blocks.",
         )
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
@@ -1239,6 +1247,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             max_num_important_blocks=self.max_num_important_blocks,
             important_block_mode=self.important_block_mode,
+            static_lru=self.static_lru,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             disable_hybrid_allocator=self.disable_hybrid_allocator,

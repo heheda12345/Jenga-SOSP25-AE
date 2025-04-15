@@ -73,6 +73,7 @@ class Scheduler(SchedulerInterface):
             max_num_important_blocks=self.cache_config.
             max_num_important_blocks,
             important_block_mode=self.cache_config.important_block_mode,
+            static_lru=self.cache_config.static_lru,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
 
@@ -439,6 +440,8 @@ class Scheduler(SchedulerInterface):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
+        # print("scheduled_reqs", len(scheduled_new_reqs),
+        #       len(scheduled_resumed_reqs), len(scheduled_running_reqs))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,

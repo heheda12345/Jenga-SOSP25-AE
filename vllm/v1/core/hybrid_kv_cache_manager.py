@@ -6,7 +6,7 @@ from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv, sha256
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, StaticLRUBlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocksInterface
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
@@ -52,6 +52,7 @@ class HybridKVCacheManager:
         log_stats: bool = False,
         max_num_important_blocks: int = 0,
         important_block_mode: str = "",
+        static_lru: bool = False,
     ) -> None:
         # TODO: adjust the name for item in one group, list of items in all
         # groups, and reduced item for all groups.
@@ -86,10 +87,16 @@ class HybridKVCacheManager:
                 for g in kv_cache_config.kv_cache_groups))
 
         self.max_num_important_blocks = max_num_important_blocks
-        self.block_pool = BlockPool(
-            self.num_gpu_blocks,
-            enable_caching,
-            max_num_important_blocks=max_num_important_blocks)
+        if static_lru:
+            self.block_pool = StaticLRUBlockPool(
+                self.num_gpu_blocks,
+                enable_caching,
+                num_kv_cache_groups=len(kv_cache_config.kv_cache_groups))
+        else:
+            self.block_pool = BlockPool(
+                self.num_gpu_blocks,
+                enable_caching,
+                max_num_important_blocks=max_num_important_blocks)
 
         self.specialized_managers = [
             get_specialized_manager(
