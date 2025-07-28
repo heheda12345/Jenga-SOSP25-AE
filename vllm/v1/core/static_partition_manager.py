@@ -96,6 +96,7 @@ class StaticPartitionKVCacheManager:
             get_specialized_manager(
                 kv_cache_spec=g.kv_cache_spec,
                 block_pool=self.block_pools[i],
+                enable_important_blocks=False,
             ) for i, g in enumerate(kv_cache_config.kv_cache_groups)
         ]
 
