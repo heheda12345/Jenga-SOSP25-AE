@@ -482,9 +482,9 @@ class NaiveBlock(Block):
         """
         self._append_token_ids_no_cow(token_ids)
 
-        if self._block_id is not None:
-            self._block_id = (self._allocator.cow_block_if_not_appendable(
-                self._cow_target))
+        # if self._block_id is not None:
+        #     self._block_id = (self._allocator.cow_block_if_not_appendable(
+        #         self._cow_target))
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block

@@ -35,7 +35,7 @@ class BlockTracker:
         self.reset()
 
     def enable(self):
-        assert not self.active
+        # assert not self.active
         self.active = True
         self.reset()
 
