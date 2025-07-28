@@ -1,0 +1,1 @@
+python3 -m vllm.entrypoints.openai.api_server xxxxx to launch a server. When you see `INFO:     Application startup complete.` in the log, the server starts and you can run the second command in the other terminal to run the experiments.
