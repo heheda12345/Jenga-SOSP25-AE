@@ -188,10 +188,12 @@ python3 benchmark_serving.py --port 24871 --model meta-llama/Llama-3.1-8B-Instru
 
 # PyramidKV
 ```bash
-# vLLM
-python3 -m vllm.entrypoints.openai.api_server --port 24867 --model /data/lshu/Llama-3.1-70B --enforce-eager --tensor_parallel_size 1 --max-model-len 2048 --disable-v2-block-manager --use-per-layer-block-manager --disable-log-requests 
-python3 -m vllm.entrypoints.openai.api_server --port 24868 --model /data/lshu/Llama-3.1-70B --enforce-eager --tensor_parallel_size 1 --max-model-len 2048 --disable-log-requests 
+# vLLM, static partition
+python3 -m vllm.entrypoints.openai.api_server --port 24868 --model ~/paramid-70b-fp8 --enforce-eager --tensor_parallel_size 1 --max-model-len 2048 --disable-log-requests --load-format dummy
+python3 benchmark_serving.py --port 24868 --model ~/paramid-70b-fp8 --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 100 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/paramid.vllm.mmlu.log
 
-python3 benchmark_serving.py --port 24867 --model /data/lshu/Llama-3.1-70B --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 100 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/paramid.sys.mmlu.log
-python3 benchmark_serving.py --port 24868 --model /data/lshu/Llama-3.1-70B --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 100 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/paramid.vllm.mmlu.log
+
+# MAX page, Jenga
+python3 -m vllm.entrypoints.openai.api_server --port 24867 --model ~/paramid-70b-fp8 --enforce-eager --tensor_parallel_size 1 --max-model-len 2048 --disable-v2-block-manager --use-per-layer-block-manager --disable-log-requests --load-format dummy
+python3 benchmark_serving.py --port 24867 --model ~/paramid-70b-fp8 --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 100 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/paramid.sys.mmlu.log
 ```

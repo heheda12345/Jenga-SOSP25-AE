@@ -1,0 +1,5 @@
+model,vllm-MAX,vllm-manual,sys
+Gemma-2,0.36,0.51,0.57
+Ministral (x10),0.7933359778,0.8338327644,0.8959068257
+character,0.57,0.92,3.04
+Llama,1.15,1.68,1.63

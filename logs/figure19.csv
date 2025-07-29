@@ -1,0 +1,5 @@
+model,vllm-throughput,jenga-throughput, vllm-latency, jenga-latency
+internvl,2.21,3.96,12148.43,4095.58
+llava,0.53,1.87,14483.84,2974.48
+phi3v,2.98,3.96,7339.03,5753.35
+paligemma2,1.43,2.11,21622.40,7736.88
