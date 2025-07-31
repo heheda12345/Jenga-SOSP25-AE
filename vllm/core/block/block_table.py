@@ -202,7 +202,7 @@ class BlockTable:
         slots_to_allocate = num_empty_slots - self._num_empty_slots
         blocks_to_allocate = cdiv(slots_to_allocate, self._block_size)
         
-        print(f"")
+        # print(f"")
 
         for _ in range(blocks_to_allocate):
             assert len(self._blocks) > 0
