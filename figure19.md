@@ -1,16 +1,25 @@
-# TODO
-notes on two commands
+# Figure 19: Vision language model with chunked prefill
 
-for throughtput, see `Request throughput (req/s)`:
-for latency, we use `--percentile-metrics ttft,tpot,itl,e2el` to print latency, and see `Mean E2EL (ms)`: 
+See [figure19.csv](logs/figure19.csv) for the value reported in the paper.
+
+
+This figure contains 2 subfigures, one for throughput and one for latency. The request rate of them are different. For each experiment, we provide 3 commands. You should still use 2 terminals for server and benchmark.
+
+1. In both terminals, set up the environment with the given commands.
+2. In the first terminal, run the server with the first command `python3 -m vllm.entrypoints.openai.api_server xxxxx`. Wait until you see `INFO:     Application startup complete.` in the log, which means the server starts.
+3. In the second terminal, run the throughput benchmark with the second command `python3 benchmark_serving.py`. The throughput is reported in the `Request throughput (req/s)` field.
+4. When step 3 is done, run the latency benchmark with the third command `python3 benchmark_serving.py --percentile-metrics ttft,tpot,itl,e2el --request-rate xxx`. The latency is reported in the `Mean E2EL (ms)` field.
+
+
 
 ## vLLM
+Commands for setting up the environment.
 ```bash
 source ~/venv/vllm-v0-mm-baseline/bin/activate 
-export HF_TOKEN=xxxxxxx
+export HF_TOKEN=xxxxxxx # For AE reviewers: we give you an HF token in the internal guide.
 cd Jenga-SOSP25-AE
 ```
-
+Run the experiment.
 ```bash
 # internvl-launch server
 python3 -m vllm.entrypoints.openai.api_server --port 24891 --model OpenGVLab/InternVL2-8B --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests
@@ -45,10 +54,10 @@ python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:2
 ## Jenga
 ```bash
 source ~/venv/vllm-v0-jenga/bin/activate 
-export HF_TOKEN=xxxxxxx
+export HF_TOKEN=xxxxxxx # For AE reviewers: we give you an HF token in the internal guide.
 cd Jenga-SOSP25-AE
 ```
-
+Run the experiment.
 ```bash
 # internvl-launch server
 python3 -m vllm.entrypoints.openai.api_server --port 24890 --model OpenGVLab/InternVL2-8B --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests --disable-v2-block-manager --use-per-layer-block-manager
