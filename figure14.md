@@ -74,7 +74,7 @@ Jenga uses different set of mamba kernels. For a fair comparison, we use the sam
 
 
 
-# 1.2 max page, static partition, and Jenga
+## 1.2 max page, static partition, and Jenga
 Commands for setting up the environment.
 ```bash
 source ~/venv/vllm-v0-jenga/bin/activate 
