@@ -44,7 +44,7 @@ python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:2
 python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:24895/v1 --endpoint /chat/completions --model microsoft/Phi-3-vision-128k-instruct --dataset-path MMMU/MMMU_Pro --dataset-name hf --hf-subset "vision" --hf-split test --num_prompts=200 --seed 55555 --hf-output-len 200 --percentile-metrics ttft,tpot,itl,e2el --request-rate 2.9 --trust_remote_code --ignore-eos 2>&1 | tee logs/mm-chunk-prefill/vllm.phi3v.latency.v2.log
 
 # paligemma2-launch server
-python3 -m vllm.entrypoints.openai.api_server --port 24897 --model google/paligemma2-10b-pt-896 --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests --chat-template /data/zhang-chen/vllm/examples/template_llava.jinja
+python3 -m vllm.entrypoints.openai.api_server --port 24897 --model google/paligemma2-10b-pt-896 --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests --chat-template ~/vllm-v0-jenga/examples/template_llava.jinja
 # paligemma2-throughput test
 python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:24897/v1 --endpoint /chat/completions --model google/paligemma2-10b-pt-896 --dataset-path MMMU/MMMU_Pro --dataset-name hf --hf-subset "vision" --hf-split test --num_prompts=200 --seed 55555 --hf-output-len 200 --trust_remote_code --ignore-eos 2>&1 | tee logs/mm-chunk-prefill/vllm.paligemma2.log
 # paligemma2-latency test
@@ -82,7 +82,7 @@ python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:2
 python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:24894/v1 --endpoint /chat/completions --model microsoft/Phi-3-vision-128k-instruct --dataset-path MMMU/MMMU_Pro --dataset-name hf --hf-subset "vision" --hf-split test --num_prompts=200 --seed 55555 --hf-output-len 200  --percentile-metrics ttft,tpot,itl,e2el --request-rate 2.9 --trust_remote_code --ignore-eos 2>&1 | tee logs/mm-chunk-prefill/sys.phi3v.latency.log
 
 # paligemma2-launch server
-python3 -m vllm.entrypoints.openai.api_server --port 24896 --model google/paligemma2-10b-pt-896 --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests --disable-v2-block-manager --use-per-layer-block-manager --chat-template /data/zhang-chen/vllm/examples/template_llava.jinja
+python3 -m vllm.entrypoints.openai.api_server --port 24896 --model google/paligemma2-10b-pt-896 --trust_remote_code --enable_chunked_prefill --max_num_batched_tokens 1024 --disable-log-requests --disable-v2-block-manager --use-per-layer-block-manager --chat-template ~/vllm-v0-jenga/examples/template_llava.jinja
 # paligemma2-throughput test
 python3 benchmark_serving.py --backend openai-chat --base-url http://localhost:24896/v1 --endpoint /chat/completions --model google/paligemma2-10b-pt-896 --dataset-path MMMU/MMMU_Pro --dataset-name hf --hf-subset "vision" --hf-split test --num_prompts=200 --seed 55555 --hf-output-len 200 --trust_remote_code --ignore-eos 2>&1 | tee logs/mm-chunk-prefill/sys.paligemma2.log
 # paligemma2-latency test
