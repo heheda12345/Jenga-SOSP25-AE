@@ -152,10 +152,12 @@ class SlidingWindowManager(SpecializedManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
                  enable_important_blocks: bool):
         super().__init__(kv_cache_spec, block_pool, enable_important_blocks)
-        self.sliding_window = kv_cache_spec.sliding_window
+        # sliding window used by remove_skipped_blocks
+        self.sliding_window = kv_cache_spec.sliding_window + 192
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
-        self.sliding_window_contiguous_blocks = cdiv((self.sliding_window - 1),
+        # sliding window used by _find_longest_cache_hit
+        self.sliding_window_contiguous_blocks = cdiv((kv_cache_spec.sliding_window - 1),
                                                      self.block_size)
         self._null_block = block_pool.null_block
         self.full_hit = False
