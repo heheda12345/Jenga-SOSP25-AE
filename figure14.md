@@ -221,8 +221,11 @@ python3 benchmark_serving.py --port 24867 --model meta-llama/Llama-4-Scout-17B-1
 ```
 
 * Llama-3.1 (70b, needs 4 H100 GPUs)
+
+Since llama 3.1 only has full attention layers and doesn't have efficient attention layers, "static partition" refers to partition the kv cache memory equally across all layers, which is vLLM's default behavior. Therefore, we reuse the number of vLLM for static partition.
+
 ```bash
-# vLLM
+# vLLM & Static partition
 python3 -m vllm.entrypoints.openai.api_server --port 24872 --model meta-llama/Llama-3.1-70B-Instruct --tensor_parallel_size 4 --disable-log-requests --disable-hybrid-allocator 
 
 python3 benchmark_serving.py --port 24872 --model meta-llama/Llama-3.1-70B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.vllm.mmlu.log
@@ -232,11 +235,6 @@ python3 -m vllm.entrypoints.openai.api_server --port 24873 --model meta-llama/Ll
 
 python3 benchmark_serving.py --port 24873 --model meta-llama/Llama-3.1-70B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.max.mmlu.log
 
-# Static partition
-python3 -m vllm.entrypoints.openai.api_server --port 24874 --model meta-llama/Llama-3.1-70B-Instruct --tensor_parallel_size 4 --disable-log-requests --static-partition-allocator
-
-python3 benchmark_serving.py --port 24874 --model meta-llama/Llama-3.1-70B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.static.mmlu.log
-
 # Jenga
 python3 -m vllm.entrypoints.openai.api_server --port 24871 --model meta-llama/Llama-3.1-70B-Instruct --tensor_parallel_size 4 --disable-log-requests
 
@@ -245,7 +243,7 @@ python3 benchmark_serving.py --port 24871 --model meta-llama/Llama-3.1-70B-Instr
 
 We also provide commands to run Llama 3.1 8b which can be evaluated on 1 GPU. The thoughput of all tests should be about 16 reqs/s.
 ```bash
-# vLLM
+# vLLM & Static partition
 python3 -m vllm.entrypoints.openai.api_server --port 24872 --model meta-llama/Llama-3.1-8B-Instruct --disable-log-requests --disable-hybrid-allocator 
 
 python3 benchmark_serving.py --port 24872 --model meta-llama/Llama-3.1-8B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.vllm.mmlu.log
@@ -254,11 +252,6 @@ python3 benchmark_serving.py --port 24872 --model meta-llama/Llama-3.1-8B-Instru
 python3 -m vllm.entrypoints.openai.api_server --port 24873 --model meta-llama/Llama-3.1-8B-Instruct --disable-log-requests --max-page-allocator
 
 python3 benchmark_serving.py --port 24873 --model meta-llama/Llama-3.1-8B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.max.mmlu.log
-
-# Static partition
-python3 -m vllm.entrypoints.openai.api_server --port 24874 --model meta-llama/Llama-3.1-8B-Instruct --disable-log-requests --static-partition-allocator
-
-python3 benchmark_serving.py --port 24874 --model meta-llama/Llama-3.1-8B-Instruct --dataset-path meta-llama/Llama-3.1-405B-evals --dataset-name hf --hf-subset "Llama-3.1-405B-evals__mmlu_pro__details" --hf-split latest --num_prompts 200 --seed 55555 --ignore-eos 2>&1 | tee logs/e2e/llama3.static.mmlu.log
 
 # Jenga
 python3 -m vllm.entrypoints.openai.api_server --port 24871 --model meta-llama/Llama-3.1-8B-Instruct --disable-log-requests
