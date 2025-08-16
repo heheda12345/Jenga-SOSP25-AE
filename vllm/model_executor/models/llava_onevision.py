@@ -16,7 +16,7 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.utils import MMEmbeddingMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block_v3.custom_block import SelfAttentionManager, VisionEmbeddingManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
@@ -54,7 +54,8 @@ _MAX_NUM_VIDEOS = 1
 
 def custom_block_manager_for_llava_onevision(model_config: ModelConfig,
                                              cache_config: CacheConfig,
-                                             parallel_config: ParallelConfig):
+                                             parallel_config: ParallelConfig,
+                                             scheduler_config: SchedulerConfig):
     custom_managers = {}
     for i in range(model_config.get_num_layers(parallel_config)):
         custom_managers[str(i)] = SelfAttentionManager(

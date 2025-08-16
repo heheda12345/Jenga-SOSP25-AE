@@ -22,7 +22,7 @@ from transformers import Gemma2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig
+from vllm.config import CacheConfig, LoRAConfig, ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block_v3.custom_block import SelfAttentionManager, SlidingWindowManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -51,7 +51,8 @@ logger = init_logger(__name__)
 
 def custom_block_manager_for_gemma2(model_config: ModelConfig,
                                     cache_config: CacheConfig,
-                                    parallel_config: ParallelConfig):
+                                    parallel_config: ParallelConfig,
+                                    scheduler_config: SchedulerConfig):
     custom_managers = {}
     sliding_window = model_config.hf_config.sliding_window
     for i in range(model_config.get_num_layers(parallel_config)):

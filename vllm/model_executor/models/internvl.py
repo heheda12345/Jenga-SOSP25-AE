@@ -17,7 +17,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.utils import MMEmbeddingMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block_v3.custom_block import SelfAttentionManager, VisionEmbeddingManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
@@ -47,7 +47,8 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 def custom_block_manager_for_internvl(model_config: ModelConfig,
                                       cache_config: CacheConfig,
-                                      parallel_config: ParallelConfig):
+                                      parallel_config: ParallelConfig,
+                                      scheduler_config: SchedulerConfig):
     custom_managers = {}
     for i in range(model_config.get_num_layers(parallel_config)):
         custom_managers[str(i)] = SelfAttentionManager(

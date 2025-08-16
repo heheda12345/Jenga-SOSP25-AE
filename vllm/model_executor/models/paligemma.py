@@ -7,7 +7,7 @@ from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.backends.utils import MMEmbeddingMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig, ParallelConfig, SchedulerConfig
 from vllm.core.block_v3.custom_block import SelfAttentionManager, SlidingWindowManager, VisionEmbeddingManager
 from vllm.core.block_v3.registry import BLOCK_MANAGER_REGISTRY
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
@@ -32,7 +32,8 @@ logger = init_logger(__name__)
 
 def custom_block_manager_for_paligemma(model_config: ModelConfig,
                                        cache_config: CacheConfig,
-                                       parallel_config: ParallelConfig):
+                                       parallel_config: ParallelConfig,
+                                       scheduler_config: SchedulerConfig):
     custom_managers = {}
     sliding_window = model_config.hf_config.get_text_config().sliding_window
     print("model config sliding window", sliding_window)
